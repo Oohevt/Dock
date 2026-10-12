@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 swift build -c release
 APP=/Applications/DockGroups.app
 cp .build/release/DockGroups "$APP/Contents/MacOS/DockGroups"
+cp Info.plist "$APP/Contents/Info.plist"
 # 用固定证书签名：签名身份不变，系统授过的权限（自动化等）重装后不会失效。
 # 证书名写在 .signing-identity 里（不进仓库）；没有这个文件就用临时签名
 codesign -f -s "$(cat .signing-identity 2>/dev/null || echo -)" "$APP"

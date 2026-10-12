@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>DockGroups</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.example.DockGroups</string>
+    <key>CFBundleName</key>
+    <string>DockGroups</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <!-- 声明支持中文：否则进程按英文运行，取到的应用名是 WeChat 而不是 微信 -->
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>zh_CN</string>
+        <string>en</string>
+    </array>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>DockGroups 需要 Apple Events 权限来启动应用。</string>
+    <key>NSUserNotificationAlertStyle</key>
+    <string>alert</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>DockGroups URL Scheme</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>dockgroups</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

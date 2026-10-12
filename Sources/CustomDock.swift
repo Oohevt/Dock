@@ -203,7 +203,8 @@ final class DockBarView: NSView {
     private var badgeLayers: [String: CALayer] = [:]
     private var badgeText: [String: String] = [:]
     private var badgeAspect: [String: CGFloat] = [:]
-    private var menuOpen = false
+    var menuOpen = false                 // 右键菜单打开期间：保持放大、不收起、不显示名称提示
+    private var tipSuppressed: String?   // 刚点过的图标不再显示名称提示（会和弹跳、分组面板叠在一起），鼠标移到别处才恢复
     private let glass: NSView
     private let iconHost = NSView()
     override func hitTest(_ point: NSPoint) -> NSView? { frame.contains(point) ? self : nil }
@@ -637,9 +638,12 @@ final class DockBarView: NSView {
 
     private var lastTip = ""
     func updateTooltip() {
+        if mouseX == nil { tipSuppressed = nil }
         guard !menuOpen, dragState?.active != true, slide < 0.01, let mx = mouseX, let i = index(at: NSPoint(x: mx, y: bottomMargin + barH / 2)), let il = iconLayers[model.entries[i].id] else {
             tipBg.opacity = 0; lastTip = ""; return
         }
+        if model.entries[i].id == tipSuppressed { tipBg.opacity = 0; lastTip = ""; return }
+        tipSuppressed = nil
         let text = label(for: model.entries[i])
         if text == lastTip && tipBg.opacity == 1 {
             CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -659,12 +663,13 @@ final class DockBarView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        if menuOpen { return }
         let p = convert(event.locationInWindow, from: nil)
         let inBand = p.y <= bottomMargin + barH + (mouseX != nil ? (L - S) + 10 : 4) && slide < 0.5
         mouseX = inBand ? p.x : nil
         startLink()
     }
-    override func mouseExited(with event: NSEvent) { mouseX = nil; startLink() }
+    override func mouseExited(with event: NSEvent) { if menuOpen { return }; mouseX = nil; startLink() }
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
@@ -725,6 +730,7 @@ final class DockBarView: NSView {
         dgLog("mouseUp at \(p) index=\(String(describing: hit)) pressed=\(String(describing: pressedIndex))")
         guard let i = hit ?? pressedIndex, i < model.entries.count else { return }
         let e = model.entries[i]
+        tipSuppressed = e.id; tipBg.opacity = 0
         switch e {
         case .app(let path, _):
             if model.runningApp(path) == nil { bounce(e.id, path: path) }
@@ -751,14 +757,29 @@ final class DockBarView: NSView {
         case .trash: menu = buildTrashMenu()
         default: return
         }
-        // 像系统程序坞一样：菜单出现在图标正上方、水平居中
+        // 像系统程序坞一样：菜单贴着图标正上方、水平居中。
+        // menu.size 把"按住 Option 才出现"的替换项（强制退出）也算成一行，要减掉，否则菜单会飘高一截
         let size = menu.size
-        let pt = NSPoint(x: il.position.x - size.width / 2, y: il.frame.maxY + 10 + size.height)
+        let extra = menu.items.filter { $0.isAlternate || $0.isHidden }.count
+        let h = size.height - CGFloat(extra) * Self.menuRowHeight
+        let pt = NSPoint(x: il.position.x - size.width / 2, y: il.frame.maxY + h)
         // 菜单打开期间不显示名称提示：否则提示会被逐帧刷新重新显示，叠在菜单后面
         menuOpen = true; tipBg.opacity = 0
         menu.popUp(positioning: nil, at: convert(pt, from: iconHost), in: self)
         menuOpen = false
+        // 菜单关闭后按鼠标当前位置重新决定是否放大
+        if let w = window {
+            let q = convert(w.mouseLocationOutsideOfEventStream, from: nil)
+            mouseX = (bounds.contains(q) && q.y <= bottomMargin + barH + (L - S) + 10) ? q.x : nil
+        }
+        startLink()
     }
+
+    static let menuRowHeight: CGFloat = {
+        let m = NSMenu()
+        m.addItem(NSMenuItem(title: "A", action: nil, keyEquivalent: "")); let one = m.size.height
+        m.addItem(NSMenuItem(title: "B", action: nil, keyEquivalent: "")); return m.size.height - one
+    }()
 
     func windowTitles(pid: pid_t) -> [String] {
         guard let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
@@ -1119,7 +1140,7 @@ final class CustomDockController {
         if atEdge { if edgeSince == nil { edgeSince = Date() } } else { edgeSince = nil }
         let revealDelay = ud.object(forKey: "origAutohideDelay") as? Double ?? 0
         if !shown && atEdge && Date().timeIntervalSince(edgeSince ?? Date()) >= revealDelay { dgLog("autohide: show"); show() }
-        else if shown && !overBar && !atEdge && Date().timeIntervalSince(lastInside) > 0.05 && !popupOpen() && v.dragState == nil { dgLog("autohide: hide"); hide() }
+        else if shown && !overBar && !atEdge && Date().timeIntervalSince(lastInside) > 0.05 && !popupOpen() && !v.menuOpen && v.dragState == nil { dgLog("autohide: hide"); hide() }
     }
     private func popupOpen() -> Bool { NSApp.windows.contains { $0 is GroupPopupWindow && $0.isVisible } }
 
