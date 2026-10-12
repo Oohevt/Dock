@@ -21,4 +21,4 @@
 | Mag enter/exit ease | spring ω≈30 | observed | magEnterOmega 30 |
 | Tooltip | 8pt gap, 13pt font | measured | tooltipGap 8, tooltipFont 13 |
 | Menu gap above icon | ~10pt | measured | menuGap 10 |
-| Material | private DockGlassMaterialLayerController / ECMaterialLayer | Dock binary strings | "edge" custom layer (default); NSGlassEffectView .clear/.regular optional (customDockGlassStyle) |
+| Material | private DockGlassMaterialLayerController / ECMaterialLayer | Dock binary strings | NSGlassEffectView `.clear`; needs `hasKeyAppearance` on the panel or it degrades to frosted |

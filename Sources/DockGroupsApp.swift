@@ -38,6 +38,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         editItem.submenu = editMenu
         NSApp.mainMenu = main
         
+        dgTrimLog()
         // 初始化菜单栏管理器
         menuBarManager = MenuBarManager()
         

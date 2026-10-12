@@ -115,7 +115,11 @@ class GroupManager: ObservableObject {
     
     // MARK: - Dock 启动器
     
+    func rebuildLaunchers() { for g in groups { createDockLauncher(for: g) } }
+
     private func createDockLauncher(for group: AppGroup) {
+        // 启动器只在用系统程序坞时才有用；生成一个要画 10 张图 + iconutil + codesign，启动时每个分组都来一遍会卡近 2 秒
+        if CustomDockController.shared.enabled { return }
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let launchersFolder = appSupport.appendingPathComponent("DockGroups/Launchers", isDirectory: true)
         try? FileManager.default.createDirectory(at: launchersFolder, withIntermediateDirectories: true)

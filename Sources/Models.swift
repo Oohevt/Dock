@@ -120,14 +120,3 @@ struct AppGroup: Codable, Identifiable, Hashable {
         return image
     }
 }
-
-private func dgSmallPNG(_ img: NSImage) -> Data? {
-    let size = NSSize(width: 128, height: 128)
-    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 128, pixelsHigh: 128, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
-    rep.size = size
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    img.draw(in: NSRect(origin: .zero, size: size))
-    NSGraphicsContext.restoreGraphicsState()
-    return rep.representation(using: .png, properties: [:])
-}

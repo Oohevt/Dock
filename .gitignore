@@ -24,3 +24,7 @@ TestData/
 
 # Debug screenshots
 shots/
+
+# Local only
+.signing-identity
+dock-backup.plist

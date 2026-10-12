@@ -26,7 +26,6 @@ class GroupPopupWindow: NSWindow {
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
         setupContent()
-        positionWindowAboveDock()
         setupEventMonitor()
     }
     
@@ -72,8 +71,6 @@ class GroupPopupWindow: NSWindow {
             self.contentView = blur
         }
     }
-    
-    private func positionWindowAboveDock() {}
     
     private func setupEventMonitor() {
         // 监听外部点击和 Esc 键
@@ -249,76 +246,6 @@ struct GroupPopupView: View {
     }
 }
 
-// MARK: - 应用图标单元格
-
-struct AppIconCell: View {
-    let app: AppInfo
-    let isHovered: Bool
-    let onTap: () -> Void
-    let onDelete: () -> Void
-    
-    var body: some View {
-        VStack(spacing: 8) {
-            ZStack(alignment: .topTrailing) {
-                // 应用图标
-                if let icon = app.getIcon() {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 64, height: 64)
-                } else {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color.gray.opacity(0.3))
-                        .frame(width: 64, height: 64)
-                }
-                
-                // 删除按钮
-                if isHovered {
-                    Button(action: onDelete) {
-                        Image(systemName: "minus.circle.fill")
-                            .font(.system(size: 20))
-                            .foregroundColor(.red)
-                            .background(Circle().fill(Color.white))
-                    }
-                    .buttonStyle(.plain)
-                    .offset(x: 8, y: -8)
-                }
-            }
-            
-            // 应用名称
-            Text(app.displayName)
-                .font(.system(size: 12))
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-                .frame(width: 80)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
-    }
-}
-
-// MARK: - 毛玻璃效果
-
-struct VisualEffectView: NSViewRepresentable {
-    let material: NSVisualEffectView.Material
-    let blendingMode: NSVisualEffectView.BlendingMode
-    
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = material
-        view.blendingMode = blendingMode
-        view.state = .active
-        return view
-    }
-    
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = material
-        nsView.blendingMode = blendingMode
-    }
-}
-
-
-/// 非激活状态下第一次点击也直接生效（否则第一次点击只用于激活窗口）
 final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }

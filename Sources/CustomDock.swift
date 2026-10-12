@@ -161,16 +161,6 @@ final class CustomDockModel: ObservableObject {
             dgLog("openApplication result app=\(app?.bundleIdentifier ?? "nil") err=\(err?.localizedDescription ?? "nil")")
         }
     }
-    func _oldOpenOrSwitch(_ path: String) {
-        if let r = runningApp(path), path != finderPath || true {
-            r.unhide()
-            if r.activate(options: [.activateAllWindows]) {
-                if path == finderPath && NSApp.windows.isEmpty == false { }
-                return
-            }
-        }
-        NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path), configuration: NSWorkspace.OpenConfiguration())
-    }
     func pin(_ p: String) { var l = pinned; if !l.contains(p) { l.append(p) }; pinned = l }
     func unpin(_ p: String) { pinned = pinned.filter { $0 != p } }
 }
@@ -225,7 +215,6 @@ final class DockBarView: NSView {
         lastGlass = .zero
         applyLayout()
     }
-    private var glassBlur: NSView? ; private var glassEdge: NSView? ; private var glassOuter: CALayer?
     let overlay = NSView()          // 浮层：提示
     private let tipBg = CALayer()
     private let tipText = CATextLayer()
@@ -235,67 +224,18 @@ final class DockBarView: NSView {
     var onWidthChange: ((CGFloat) -> Void)?
 
     override init(frame: NSRect) {
-        let style = UserDefaults.standard.string(forKey: "customDockGlassStyle") ?? "commandb"
-        // 容器：阴影 + 实际模糊玻璃 + 细亮边，白色和深色背景上都清晰
-        let box = NSView(); box.wantsLayer = true
-        let bl = box.layer!
-        bl.masksToBounds = false
-        bl.shadowColor = NSColor.black.cgColor; bl.shadowOpacity = style == "commandb" ? 0 : Float(UserDefaults.standard.object(forKey: "customDockShadow") as? Double ?? 0); bl.shadowRadius = 10; bl.shadowOffset = CGSize(width: 0, height: -2)
-        var blur: NSView
-        if style == "smoky" || style == "flat" {
-            // 贴近原生：烟熏深色、高透明，几乎不发白
-            let v = NSView(); v.wantsLayer = true
-            if style == "smoky" {
-                let fx = NSVisualEffectView(); fx.material = .hudWindow; fx.blendingMode = .behindWindow; fx.state = .active
-                fx.appearance = NSAppearance(named: .darkAqua)
-                fx.alphaValue = CGFloat(UserDefaults.standard.object(forKey: "customDockBlurAlpha") as? Double ?? 0.5)
-                fx.autoresizingMask = [.width, .height]; v.addSubview(fx)
-            }
-            let fill = NSView(); fill.wantsLayer = true; fill.autoresizingMask = [.width, .height]
-            fill.layer?.backgroundColor = NSColor(white: 0, alpha: UserDefaults.standard.object(forKey: "customDockFillAlpha") as? Double ?? 0.10).cgColor
-            v.addSubview(fill)
-            v.layer?.cornerRadius = NativeDock.cornerRadius; v.layer?.cornerCurve = .continuous; v.layer?.masksToBounds = true
-            blur = v
-        } else if #available(macOS 26.0, *), style != "vibrancy" {
+        // 液态玻璃条：自身裁剪圆角、无描边；通透折射靠 DockPanel.hasKeyAppearance。图标放在它上层
+        if #available(macOS 26.0, *) {
             let g = NSGlassEffectView()
-            g.style = (style == "clear" || style == "commandb") ? .clear : .regular
-            let tint = style == "commandb" ? 0 : (UserDefaults.standard.object(forKey: "customDockGlassTint") as? Double ?? 0.10)
-            if tint > 0 { g.tintColor = NSColor(white: 1, alpha: tint) } else if tint < 0 { g.tintColor = NSColor(white: 0, alpha: -tint) }
-            g.cornerRadius = NativeDock.cornerRadius
-            if style == "commandb" {
-                // 与 CommandB 一致：玻璃自身裁剪、无描边；内容视图放在玻璃里
-                g.contentView = NSView()
-                g.wantsLayer = true; g.layer?.borderWidth = 0; g.layer?.masksToBounds = true
-            }
-            blur = g
+            g.style = .clear; g.cornerRadius = NativeDock.cornerRadius
+            g.contentView = NSView()
+            g.wantsLayer = true; g.layer?.borderWidth = 0; g.layer?.masksToBounds = true
+            glass = g
         } else {
             let v = NSVisualEffectView(); v.material = .hudWindow; v.blendingMode = .behindWindow; v.state = .active
             v.wantsLayer = true; v.layer?.cornerRadius = NativeDock.cornerRadius; v.layer?.cornerCurve = .continuous; v.layer?.masksToBounds = true
-            blur = v
+            glass = v
         }
-        blur.autoresizingMask = [.width, .height]
-        for sv in blur.subviews { sv.frame = blur.bounds }
-        box.addSubview(blur)
-        let edge = NSView(); edge.wantsLayer = true; edge.autoresizingMask = [.width, .height]
-        let el = edge.layer!
-        el.cornerRadius = NativeDock.cornerRadius; el.cornerCurve = .continuous
-        let rimA = style == "commandb" ? 0 : (UserDefaults.standard.object(forKey: "customDockRimAlpha") as? Double ?? 0.35)
-        el.borderWidth = rimA > 0 ? 1 : 0; el.borderColor = NSColor(white: 1, alpha: rimA).cgColor
-        let ol = CALayer(); ol.cornerRadius = NativeDock.cornerRadius + 0.5; ol.cornerCurve = .continuous
-        ol.borderWidth = (style == "commandb" || UserDefaults.standard.bool(forKey: "customDockNoOuter")) ? 0 : 0.5; ol.borderColor = NSColor(white: 0, alpha: 0.18).cgColor
-        ol.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        el.addSublayer(ol)
-        box.addSubview(edge)
-        if style == "commandb" {
-            // 与 CommandB 完全一致：玻璃直接挂在根视图下，无包装/阴影/描边视图
-            blur.removeFromSuperview(); blur.autoresizingMask = []
-            glassBlur = nil; glassEdge = nil; glassOuter = nil
-            glass = blur
-        } else {
-            glassBlur = blur; glassEdge = edge; glassOuter = ol
-            glass = box
-        }
-        dgLog("glass style=\(style) view=\(type(of: glass)) sub=\(glass.subviews.map { String(describing: type(of: $0)) })")
         super.init(frame: frame)
         wantsLayer = true
         layer?.masksToBounds = false
@@ -639,9 +579,6 @@ final class DockBarView: NSView {
             let gf = NSRect(x: ((minX - barPadX) * 2).rounded() / 2, y: (barY * 2).rounded() / 2, width: ((maxX - minX + barPadX * 2) * 2).rounded() / 2, height: barH)
             if abs(gf.minX - lastGlass.minX) > 0.25 || abs(gf.width - lastGlass.width) > 0.25 || abs(gf.minY - lastGlass.minY) > 0.25 {
                 glass.frame = gf; lastGlass = gf
-                glassBlur?.frame = glass.bounds; glassEdge?.frame = glass.bounds
-                glassOuter?.frame = glass.bounds.insetBy(dx: -0.5, dy: -0.5)
-                if glassOuter != nil { glass.layer?.shadowPath = CGPath(roundedRect: glass.bounds, cornerWidth: NativeDock.cornerRadius, cornerHeight: NativeDock.cornerRadius, transform: nil) }
             }
         }
         for e in list {
@@ -790,7 +727,7 @@ final class DockBarView: NSView {
         let e = model.entries[i]
         switch e {
         case .app(let path, _):
-            if model.runningApp(path) == nil { bounce(e.id) }
+            if model.runningApp(path) == nil { bounce(e.id, path: path) }
             model.openOrSwitch(path)
         case .group(let gid):
             if let g = GroupManager.shared.groups.first(where: { $0.id == gid }), let w = window, let il = iconLayers[e.id] {
@@ -939,14 +876,21 @@ final class DockBarView: NSView {
     }
 
     // 启动弹跳
-    func bounce(_ id: String) {
-        guard let l = iconLayers[id] else { return }
+    // 启动弹跳：和原生一样一直弹到应用启动完成（最多 15 秒），每一跳都完整落地
+    func bounce(_ id: String, path: String, started: Date = Date(), chained: Bool = false) {
+        guard let l = iconLayers[id], chained || l.animation(forKey: "bounce") == nil else { return }
         let a = CAKeyframeAnimation(keyPath: "transform.translation.y")
-        a.values = [0, S * 0.45, 0, S * 0.3, 0, S * 0.15, 0]
-        a.keyTimes = [0, 0.16, 0.33, 0.5, 0.66, 0.83, 1]
-        a.timingFunctions = Array(repeating: CAMediaTimingFunction(name: .easeInEaseOut), count: 6)
-        a.duration = 1.4
+        a.values = [0, S * 0.42, 0]
+        a.keyTimes = [0, 0.5, 1]
+        a.timingFunctions = [CAMediaTimingFunction(name: .easeOut), CAMediaTimingFunction(name: .easeIn)]   // 上升减速、下落加速
+        a.duration = 0.6
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak self] in
+            guard let self = self, !self.model.running.contains(path), Date().timeIntervalSince(started) < 15 else { return }
+            self.bounce(id, path: path, started: started, chained: true)
+        }
         l.add(a, forKey: "bounce")
+        CATransaction.commit()
     }
 }
 
@@ -966,6 +910,13 @@ func dgLog(_ s: String) {
     else { try? line.write(to: url, atomically: true, encoding: .utf8) }
 }
 
+// 日志只增不减：启动时超过 512KB 就只留最后 256KB
+func dgTrimLog() {
+    let url = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Logs/DockGroups.log")
+    guard let d = try? Data(contentsOf: url), d.count > 512 * 1024 else { return }
+    try? d.suffix(256 * 1024).write(to: url, options: .atomic)
+}
+
 final class ClosureMenuItem: NSMenuItem {
     let fn: () -> Void
     init(title: String, action: @escaping () -> Void) {
@@ -976,8 +927,6 @@ final class ClosureMenuItem: NSMenuItem {
     required init(coder: NSCoder) { fatalError() }
     @objc func fire() { fn() }
 }
-
-extension Int { var cgf: CGFloat { CGFloat(self) } }
 
 var dgPopupAnchorX: CGFloat? = nil
 
@@ -1043,7 +992,7 @@ final class CustomDockController {
         p.isOpaque = false; p.backgroundColor = .clear; p.hasShadow = false
         // 只比原生程序坞高一级：必须低于 .statusBar(25)，否则会盖在截图遮罩等全屏覆盖层上面
         p.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) + 1)
-        p.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]   // 全屏空间中不显示
+        p.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]   // 全屏应用里也能推到底边唤出
         p.hidesOnDeactivate = false
         p.acceptsMouseMovedEvents = true
         let v = DockBarView(frame: .zero)
@@ -1215,6 +1164,7 @@ final class CustomDockController {
         ud.removeObject(forKey: "origAutohideDelay"); ud.removeObject(forKey: "origAutohide")
         ud.set(false, forKey: "customDockEnabled")
         stop()
+        GroupManager.shared.rebuildLaunchers()   // 回到系统程序坞：分组靠启动器小应用放进去
     }
 }
 
