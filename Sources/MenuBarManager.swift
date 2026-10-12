@@ -210,6 +210,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
             return
         }
         
+        if url.scheme == "dockgroups" && url.host == "selfcheck" { SelfCheck.run(); return }
         if url.scheme == "dockgroups" && url.host == "selftest" {
             CustomDockController.shared.selfTest(index: Int(url.lastPathComponent) ?? 0)
             return

@@ -46,6 +46,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         GroupManager.shared.loadGroups()
         
         if CustomDockController.shared.enabled { CustomDockController.shared.resume() }
+        SelfCheck.run()   // 要在接管系统程序坞之后，才能检查它是否已被压下去
         // kill / 注销发来的 SIGTERM 默认直接杀进程，不走 applicationWillTerminate：转成正常退出
         for sig in [SIGTERM, SIGINT, SIGHUP] {
             signal(sig, SIG_IGN)

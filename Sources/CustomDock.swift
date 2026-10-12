@@ -1422,6 +1422,10 @@ enum AppWindows {
 
     // 和系统程序坞的"显示所有窗口"一样：进入这个应用的 App Exposé（私有接口，不需要授权；找不到就返回 false 走普通切换）
     private typealias CoreDockSend = @convention(c) (CFString, Int32) -> Void
+    static var exposeAvailable: Bool {
+        _ = dlopen("/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices", RTLD_LAZY)
+        return dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CoreDockSendNotification") != nil
+    }
     static func exposeWindows(of app: NSRunningApplication) -> Bool {
         _ = dlopen("/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices", RTLD_LAZY)
         guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CoreDockSendNotification") else { return false }
@@ -1439,6 +1443,7 @@ enum AppBadge {
     private static let lib = dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_LAZY)
     private static let asnCreate = dlsym(lib, "_LSASNCreateWithPid").map { unsafeBitCast($0, to: ASNCreate.self) }
     private static let infoItem = dlsym(lib, "_LSCopyApplicationInformationItem").map { unsafeBitCast($0, to: InfoItem.self) }
+    static var available: Bool { asnCreate != nil && infoItem != nil && asnCreate?(nil, getpid()) != nil }
     static func label(pid: pid_t) -> String? {
         guard let c = asnCreate, let f = infoItem, let asn = c(nil, pid)?.takeRetainedValue(),
               let d = f(-2, asn, "StatusLabel" as CFString)?.takeRetainedValue() as? [String: Any],

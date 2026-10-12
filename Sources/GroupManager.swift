@@ -31,6 +31,7 @@ class GroupManager: ObservableObject {
         do {
             let data = try Data(contentsOf: storageURL)
             groups = try JSONDecoder().decode([AppGroup].self, from: data)
+            pruneLaunchers()
             print("成功加载 \(groups.count) 个分组")
             
             // 为每个分组创建 Dock 启动器
@@ -43,10 +44,23 @@ class GroupManager: ObservableObject {
         }
     }
     
+    // 删掉不属于任何现有分组的启动器小应用（分组被删除或改名后会留下）
+    func pruneLaunchers() {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = appSupport.appendingPathComponent("DockGroups/Launchers", isDirectory: true)
+        guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
+        let keep = Set(groups.map { $0.name + ".app" })
+        for n in items where n.hasSuffix(".app") && !keep.contains(n) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(n))
+            dgLog("pruned orphan launcher \(n)")
+        }
+    }
+
     func saveGroups() {
+        pruneLaunchers()
         do {
             let data = try JSONEncoder().encode(groups)
-            try data.write(to: storageURL)
+            try data.write(to: storageURL, options: .atomic)   // 先写临时文件再替换：写到一半断电/崩溃也不会把分组文件写坏
             print("成功保存 \(groups.count) 个分组")
         } catch {
             print("保存分组失败: \(error)")
