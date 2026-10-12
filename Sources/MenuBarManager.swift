@@ -125,6 +125,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         }
         let window = GroupPopupWindow(group: group)
         currentPopup = window
+        dgRememberFrontApp()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

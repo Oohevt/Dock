@@ -826,8 +826,8 @@ final class DockBarView: NSView {
             let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24)); f.stringValue = g.name
             a.accessoryView = f; a.addButton(withTitle: "好"); a.addButton(withTitle: "取消")
             a.window.initialFirstResponder = f
-            NSApp.activate(ignoringOtherApps: true)
-            if a.runModal() == .alertFirstButtonReturn {
+            dgRememberFrontApp(); NSApp.activate(ignoringOtherApps: true)
+            if dgRunAlert(a) == .alertFirstButtonReturn {
                 let n = f.stringValue.trimmingCharacters(in: .whitespaces)
                 if !n.isEmpty { g.name = n; GroupManager.shared.updateGroup(g) }
             }
@@ -839,8 +839,8 @@ final class DockBarView: NSView {
             let a = NSAlert(); a.messageText = "移除分组「\(g.name)」？"
             a.informativeText = "只是解散这个分组，里面的应用不会被删除。"
             a.addButton(withTitle: "移除"); a.addButton(withTitle: "取消")
-            NSApp.activate(ignoringOtherApps: true)
-            if a.runModal() == .alertFirstButtonReturn { GroupManager.shared.deleteGroup(g) }
+            dgRememberFrontApp(); NSApp.activate(ignoringOtherApps: true)
+            if dgRunAlert(a) == .alertFirstButtonReturn { GroupManager.shared.deleteGroup(g) }
         })
         return menu
     }
@@ -1120,9 +1120,11 @@ final class CustomDockController {
     let ud = UserDefaults.standard
 
     var enabled: Bool { ud.bool(forKey: "customDockEnabled") }
+    // 每个 tick 都要读：缓存起来，只通过 setter 改（读 UserDefaults 比想象的贵）
+    private lazy var autoHideValue: Bool = ud.object(forKey: "customDockAutoHide") as? Bool ?? true
     var autoHide: Bool {
-        get { ud.object(forKey: "customDockAutoHide") as? Bool ?? true }
-        set { ud.set(newValue, forKey: "customDockAutoHide"); if !newValue { show() } }
+        get { autoHideValue }
+        set { autoHideValue = newValue; ud.set(newValue, forKey: "customDockAutoHide"); if !newValue { show() } }
     }
 
     func start() {
@@ -1152,32 +1154,37 @@ final class CustomDockController {
         // 那样鼠标在屏幕任何地方移动，每个事件都要投递给本进程，实测占 4% CPU
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(timer!, forMode: .common)
-        localMon = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] e in self?.tick(); return e }
-        // 分辨率/显示器变化：重新定位
+        // 分辨率/显示器变化：重新读屏幕信息、重新定位
+        refreshScreens()
         screenObs = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.frameWindow(); self?.bar?.reloadIcons()
+            self?.refreshScreens(); self?.frameWindow(); self?.bar?.reloadIcons()
         }
     }
 
-    private var localMon: Any?
     private var screenObs: Any?
     func stop() {
         if let o = screenObs { NotificationCenter.default.removeObserver(o); screenObs = nil }
-        if let l = localMon { NSEvent.removeMonitor(l); localMon = nil }
         timer?.invalidate(); timer = nil; panel?.orderOut(nil); panel = nil; bar = nil; dgCustomDockTop = nil }
 
     // 窗口固定全屏宽、足够高（容纳放大和标签），只有图标区域接收点击
     private var dockDisplay: CGDirectDisplayID?
     static func displayID(_ s: NSScreen) -> CGDirectDisplayID { (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0 }
+    // 屏幕信息缓存：tick 每秒跑 30 次，每次现取 NSScreen.screens + deviceDescription 很贵；屏幕变化时（通知）才刷新
+    private var screenInfo: [(screen: NSScreen, id: CGDirectDisplayID, frame: NSRect)] = []
+    private func refreshScreens() { screenInfo = NSScreen.screens.map { ($0, Self.displayID($0), $0.frame) } }
     // 程序坞当前在哪块屏幕上（那块屏幕被拔掉就回到主屏）
-    private var dockScreen: NSScreen { NSScreen.screens.first { Self.displayID($0) == dockDisplay } ?? NSScreen.screens.first ?? NSScreen.main! }
-    // 鼠标是否贴在某块屏幕的底边（上下叠放的两块屏幕之间的交界不算）
-    private func edgeScreen(_ m: NSPoint) -> NSScreen? {
-        NSScreen.screens.first { s in
+    private var dockInfo: (screen: NSScreen, id: CGDirectDisplayID, frame: NSRect) {
+        if screenInfo.isEmpty { refreshScreens() }
+        return screenInfo.first { $0.id == dockDisplay } ?? screenInfo.first ?? (NSScreen.main!, 0, NSScreen.main!.frame)
+    }
+    private var dockScreen: NSScreen { dockInfo.screen }
+    // 鼠标是否贴在某块屏幕的底边（上下叠放的两块屏幕之间的交界不算），返回那块屏幕的 ID
+    private func edgeDisplay(_ m: NSPoint) -> CGDirectDisplayID? {
+        screenInfo.first { s in
             let f = s.frame
             return m.x >= f.minX && m.x <= f.maxX && m.y <= f.minY + 2 && m.y >= f.minY - 1
-                && !NSScreen.screens.contains { $0 !== s && $0.frame.contains(NSPoint(x: m.x, y: f.minY - 1)) }
-        }
+                && !screenInfo.contains { $0.id != s.id && $0.frame.contains(NSPoint(x: m.x, y: f.minY - 1)) }
+        }?.id
     }
 
     private func frameWindow(moved: Bool = false) {
@@ -1237,14 +1244,14 @@ final class CustomDockController {
         guard let p = panel, let v = bar else { return }
         let m = NSEvent.mouseLocation
         // 自动隐藏时：鼠标推到另一块屏幕的底边，程序坞跟过去（和系统一样）
-        if autoHide, let es = edgeScreen(m), Self.displayID(es) != Self.displayID(dockScreen), v.dragState == nil, !v.menuOpen {
-            dockDisplay = Self.displayID(es)
+        if autoHide, let ed = edgeDisplay(m), ed != dockInfo.id, v.dragState == nil, !v.menuOpen {
+            dockDisplay = ed
             shown = false; v.slide = 1; v.slideTarget = 1; v.mouseX = nil
             frameWindow(moved: true)
             edgeSince = nil
         }
-        let screen = dockScreen
-        let atEdge = edgeScreen(m).map { Self.displayID($0) == Self.displayID(screen) } ?? false
+        let dock = dockInfo
+        let atEdge = edgeDisplay(m) == dock.id
         // 已收起且鼠标不在底边：直接返回
         if !shown && !atEdge && !inExpose && p.ignoresMouseEvents && autoHide { edgeSince = nil; return }
         // 查窗口列表一次约 1ms：只在可见或即将唤出时查，最多 0.3s 一次
@@ -1261,7 +1268,7 @@ final class CustomDockController {
         }
         if now.timeIntervalSince(lastExposeCheck) > 0.3 {
             lastExposeCheck = now
-            let e = exposeActive(screen)
+            let e = exposeActive(dock.screen)
             if e != inExpose {
                 inExpose = e
                 dgLog("expose \(e)")

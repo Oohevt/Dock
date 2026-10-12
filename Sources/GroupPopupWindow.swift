@@ -71,7 +71,7 @@ class GroupPopupWindow: NSWindow {
             // 与程序坞条同款：通透折射的液态玻璃，自身圆角裁剪
             let g = NSGlassEffectView(frame: host.frame)
             g.style = .clear; g.cornerRadius = Self.radius
-            g.tintColor = NSColor(white: 0, alpha: 0.22)   // 面板里有文字：压暗一点保证白字在亮背景上可读
+            g.tintColor = NSColor(white: 0, alpha: 0.34)   // 面板里有文字：压暗一点保证白字在亮背景上可读
             g.contentView = host
             g.wantsLayer = true; g.layer?.borderWidth = 0; g.layer?.masksToBounds = true
             self.contentView = g
@@ -162,6 +162,7 @@ struct GroupPopupView: View {
         NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path), configuration: cfg) { _, err in
             dgLog("popup open \(path) err=\(String(describing: err))")
         }
+        dgPreviousFrontApp = nil   // 点面板里的操作是去打开/切换别的应用：别把焦点还给之前的应用，会盖掉它
         window?.close()
     }
     
@@ -243,6 +244,7 @@ struct GroupPopupView: View {
                         Divider()
                         Button("在访达中显示") {
                             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: app.path)])
+                            dgPreviousFrontApp = nil   // 点面板里的操作是去打开/切换别的应用：别把焦点还给之前的应用，会盖掉它
                             window?.close()
                         }
                         Button("从分组移除") {
@@ -260,7 +262,7 @@ struct GroupPopupView: View {
                         .position(dragLocation).allowsHitTesting(false)
                 }
             }
-            Text("点击打开 · 右键更多").font(.system(size: 10)).opacity(0.75).frame(height: 18)
+            Text("点击打开 · 右键更多").font(.system(size: 11, weight: .medium)).opacity(0.92).frame(height: 18)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

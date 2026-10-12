@@ -41,4 +41,21 @@ echo "Apple Development: you@example.com (XXXXXXXXXX)" > .signing-identity
 | 调度中心让位 | 识别系统程序坞进程的全屏窗口（`exposeActive`） | 调度中心里程序坞不隐藏 |
 | 隐藏系统程序坞 | `defaults write com.apple.dock autohide-delay 1000` + `killall Dock` | 两个程序坞同时出现 |
 
+## 系统升级后怎么检查
+
+1. 看日志里应用启动时写的自检结果（每一项对应上表里的一行）：
+   ```bash
+   grep selfcheck ~/Library/Logs/DockGroups.log | tail -10
+   ```
+2. 跑回归检查（会移动鼠标、短暂唤出程序坞、右键点一下，期间别碰鼠标；需要先 `./install.sh` 装好）：
+   ```bash
+   ./tools/check.sh
+   ```
+   测试用的小工具（模拟鼠标/键盘、列窗口、模拟从访达拖文件）在 `tools/src/`，脚本会自己编译。
+
+## 已知局限
+
+- 在右键菜单里用"重命名 / 移除分组"的对话框之后，本应用会一直是"最前面的应用"，直到你切到别的应用；这期间鼠标移动会多占约 4% 的一个核。打开分组面板那条路径会正确把焦点还给原来的应用。
+- 多显示器（程序坞跟随鼠标到另一块屏幕的底边）只写了、没在真实的多屏环境下测过。
+
 原生程序坞的尺寸参数见 [NATIVE_PARAMS.md](NATIVE_PARAMS.md)。
