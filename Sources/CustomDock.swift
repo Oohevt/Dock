@@ -988,14 +988,18 @@ final class DockBarView: NSView {
         guard !apps.isEmpty else { return false }
         let ins = dropInsert ?? model.entries.count
         dropInsert = nil
+        pin(apps, atEntryIndex: ins)
+        startLink()
+        return true
+    }
+    // 把应用固定到程序坞的第 ins 个条目位置
+    func pin(_ apps: [String], atEntryIndex ins: Int) {
         // 插入位置换算成 pinned 列表中的位置
         let before = model.entries.prefix(ins).compactMap { e -> String? in if case .app(let p, true) = e, p != model.finderPath { return p }; return nil }
         var list = model.pinned.filter { !apps.contains($0) }
         let anchor = before.last.flatMap { list.firstIndex(of: $0) }.map { $0 + 1 } ?? 0
         list.insert(contentsOf: apps, at: min(anchor, list.count))
         model.pinned = list
-        startLink()
-        return true
     }
 
     // 启动弹跳
@@ -1245,6 +1249,15 @@ final class CustomDockController {
         else if shown && !overBar && !atEdge && Date().timeIntervalSince(lastInside) > 0.05 && !popupOpen() && !v.menuOpen && v.dragState == nil { dgLog("autohide: hide"); hide() }
     }
     private func popupOpen() -> Bool { NSApp.windows.contains { $0 is GroupPopupWindow && $0.isVisible } }
+
+    // 从分组面板里拖出来的应用：落在程序坞条上就插到那个位置，否则排到最后
+    func dropFromGroup(_ path: String, at screen: NSPoint) {
+        guard let p = panel, let v = bar else { CustomDockModel.shared.pin(path); return }
+        let local = v.convert(p.convertPoint(fromScreen: screen), from: nil)
+        let onBar = p.frame.contains(screen) && local.y < v.bottomMargin + v.barH + 30
+        v.pin([path], atEntryIndex: onBar ? v.insertIndex(for: local.x, excluding: "", list: v.model.entries) : v.model.entries.count)
+        v.startLink()
+    }
 
     func show() { shown = true; bar?.slideTarget = 0; bar?.startLink() }
     func hide() { shown = false; bar?.slideTarget = 1; bar?.mouseX = nil; bar?.startLink() }

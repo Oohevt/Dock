@@ -126,6 +126,7 @@ struct GroupPopupView: View {
     @State private var hoveredApp: UUID?
     @State private var draggingID: UUID?            // 拖动排序中的应用
     @State private var dragLocation: CGPoint = .zero
+    @State private var draggedOut = false           // 已拖到面板外
     @State private var runningPaths: Set<String> = GroupPopupView.currentRunningPaths()
     
     static func currentRunningPaths() -> Set<String> {
@@ -193,6 +194,10 @@ struct GroupPopupView: View {
                     .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("grid"))
                         .onChanged { v in
                             draggingID = app.id; dragLocation = v.location; hoveredApp = nil
+                            // 拖出面板：面板内的内容出不了窗口，改用一个跟着光标的小浮窗显示图标；此时不再排序
+                            let mouse = NSEvent.mouseLocation
+                            draggedOut = !(window?.frame.contains(mouse) ?? true)
+                            if draggedOut { DragGhost.show(icons[app.id], at: mouse); return } else { DragGhost.hide() }
                             guard let from = apps.firstIndex(where: { $0.id == app.id }) else { return }
                             let col = min(max(Int(v.location.x / GroupPopupWindow.cellW), 0), cols - 1)
                             let row = max(Int(v.location.y / GroupPopupWindow.cellH), 0)
@@ -203,7 +208,16 @@ struct GroupPopupView: View {
                         }
                         .onEnded { _ in
                             draggingID = nil
-                            GroupManager.shared.reorderApps(apps, in: group)
+                            DragGhost.hide()
+                            if draggedOut {
+                                // 松手在面板外：移出分组，放回程序坞
+                                draggedOut = false
+                                apps.removeAll { $0.id == app.id }
+                                GroupManager.shared.removeApp(app, from: group)
+                                CustomDockController.shared.dropFromGroup(CustomDockModel.norm(app.path), at: NSEvent.mouseLocation)
+                            } else {
+                                GroupManager.shared.reorderApps(apps, in: group)
+                            }
                         })
                     .contextMenu {
                         Button(isRunning(app) ? "切换到" : "打开") { openOrSwitch(app) }
@@ -225,7 +239,7 @@ struct GroupPopupView: View {
             }
             .coordinateSpace(name: "grid")
             .overlay(alignment: .topLeading) {
-                if let id = draggingID, let icon = icons[id] {
+                if let id = draggingID, !draggedOut, let icon = icons[id] {
                     Image(nsImage: icon).resizable().interpolation(.high).frame(width: 56, height: 56).scaleEffect(1.12)
                         .position(dragLocation).allowsHitTesting(false)
                 }
@@ -248,4 +262,22 @@ struct GroupPopupView: View {
 
 final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// 跟随光标的图标小浮窗：应用从分组面板拖到面板外时用
+enum DragGhost {
+    private static let panel: NSPanel = {
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 64, height: 64), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.isOpaque = false; p.backgroundColor = .clear; p.hasShadow = false
+        p.level = .popUpMenu; p.ignoresMouseEvents = true
+        let v = NSImageView(frame: NSRect(x: 0, y: 0, width: 64, height: 64)); v.imageScaling = .scaleProportionallyUpOrDown
+        p.contentView = v
+        return p
+    }()
+    static func show(_ image: NSImage?, at mouse: NSPoint) {
+        (panel.contentView as? NSImageView)?.image = image
+        panel.setFrameOrigin(NSPoint(x: mouse.x - 32, y: mouse.y - 32))
+        panel.orderFrontRegardless()
+    }
+    static func hide() { panel.orderOut(nil) }
 }
