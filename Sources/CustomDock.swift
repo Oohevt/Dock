@@ -201,8 +201,11 @@ final class DockBarView: NSView {
     private var dotLayers: [String: CALayer] = [:]
     private var sepLayers: [String: CALayer] = [:]
     private var badgeLayers: [String: CALayer] = [:]
+    private var runningIDs = Set<String>()
     private var badgeText: [String: String] = [:]
     private var badgeAspect: [String: CGFloat] = [:]
+    var dropTarget: String?              // 拖动时压在哪个图标中心上：分组 = 放进分组；应用 = 用它打开文件
+    private var lastInsert = 0
     var menuOpen = false                 // 右键菜单打开期间：保持放大、不收起、不显示名称提示
     private var tipSuppressed: String?   // 刚点过的图标不再显示名称提示（会和弹跳、分组面板叠在一起），鼠标移到别处才恢复
     private let glass: NSView
@@ -363,6 +366,14 @@ final class DockBarView: NSView {
         for (k, l) in dotLayers where !alive.contains(k) { l.removeFromSuperlayer(); dotLayers[k] = nil }
         for (k, l) in sepLayers where !alive.contains(k) { l.removeFromSuperlayer(); sepLayers[k] = nil }
         tipBg.zPosition = 10
+        // 哪些条目要亮运行指示点：在这里算好。以前每帧都算，分组里每个应用都要规范化一次路径（一次磁盘查询），放大时占了三成多 CPU
+        runningIDs = Set(model.entries.filter { e in
+            if case .app(let p, _) = e { return model.running.contains(p) }
+            if case .group(let gid) = e, let g = GroupManager.shared.groups.first(where: { $0.id == gid }) {
+                return g.apps.contains { model.running.contains(CustomDockModel.norm($0.path)) }
+            }
+            return false
+        }.map { $0.id })
         reloadBadges()
         onWidthChange?(baseWidth)
     }
@@ -467,7 +478,9 @@ final class DockBarView: NSView {
         if let d = dragState, d.active, let from = list.firstIndex(where: { $0.id == d.id }) {
             let e = list.remove(at: from)
             if outsideBar(d.y) { return list }   // 拖出程序坞：其他图标合拢
-            list.insert(e, at: min(insertIndex(for: d.x, excluding: d.id, list: list), list.count))
+            // 压在分组上时冻结排序，否则分组图标会在光标两侧来回让位
+            if dropTarget == nil { lastInsert = insertIndex(for: d.x, excluding: d.id, list: list) }
+            list.insert(e, at: min(lastInsert, list.count))
         } else if let ins = dropInsert {
             list.insert(.divider(99), at: min(ins, list.count))   // 占位
         }
@@ -591,9 +604,10 @@ final class DockBarView: NSView {
             guard let il = iconLayers[e.id] else { continue }
             if e.id == dragging, let d = dragState {
                 // 被拖图标：浮层，精确跟随光标
-                il.bounds = CGRect(x: 0, y: 0, width: S, height: S)
-                il.position = CGPoint(x: d.x, y: d.y - S / 2)
-                il.opacity = outsideBar(d.y) ? 0.55 : 1
+                let ds = dropTarget == nil ? S : S * 0.7   // 要落进分组时缩小一点
+                il.bounds = CGRect(x: 0, y: 0, width: ds, height: ds)
+                il.position = CGPoint(x: d.x, y: d.y - ds / 2)
+                il.opacity = outsideBar(d.y) ? 0.55 : (dropTarget == nil ? 1 : 0.85)
                 il.zPosition = 5
                 dotLayers[e.id]?.opacity = 0
                 badgeLayers[e.id]?.opacity = 0
@@ -602,18 +616,14 @@ final class DockBarView: NSView {
             il.bounds = CGRect(x: 0, y: 0, width: w, height: w)
             il.position = CGPoint(x: c, y: barY + NativeDock.iconBaseY)
             il.opacity = 1; il.zPosition = 0
+            il.setAffineTransform(e.id == dropTarget ? CGAffineTransform(scaleX: 1.12, y: 1.12) : .identity)   // 拖放目标：微微鼓起
             if let b = badgeLayers[e.id] {
                 // 贴在图标右上角，跟着放大一起变大
                 let h = w * Self.badgeRatio, bw = h * (badgeAspect[e.id] ?? 1), inset = w * 0.02
                 b.frame = CGRect(x: c + w / 2 - inset - bw, y: barY + NativeDock.iconBaseY + w - inset - h, width: bw, height: h)
                 b.opacity = 1
             }
-            let running: Bool = {
-                if case .app(let p, _) = e { return model.running.contains(p) }
-                if case .group(let gid) = e, let g = GroupManager.shared.groups.first(where: { $0.id == gid }) {
-                    return g.apps.contains { model.running.contains(CustomDockModel.norm($0.path)) }
-                }
-                return false }()
+            let running = runningIDs.contains(e.id)
             if let d = dotLayers[e.id] {
                 d.frame = CGRect(x: c - NativeDock.dotSize / 2, y: barY + NativeDock.dotY, width: NativeDock.dotSize, height: NativeDock.dotSize)
                 d.opacity = running ? 1 : 0
@@ -689,12 +699,14 @@ final class DockBarView: NSView {
         d.x = p.x; d.y = p.y
         if !d.active && hypot(p.x - d.startX, p.y - d.startY) > 6 { d.active = true; reordering = true; mouseX = nil; tipBg.opacity = 0 }
         dragState = d
+        dropTarget = (d.active && d.id.hasPrefix("app:") && !outsideBar(p.y)) ? centerHit(p.x, Self.isGroup) : nil
         if d.active { NSCursor.current.set(); if outsideBar(p.y) && d.id.hasPrefix("app:") { NSCursor.disappearingItem.set() } else { NSCursor.arrow.set() } }
         startLink()
     }
 
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+        defer { dropTarget = nil }
         if let d = dragState, d.active {
             NSCursor.arrow.set()
             let dragged = model.entries.first(where: { $0.id == d.id }) ?? .trash
@@ -709,6 +721,12 @@ final class DockBarView: NSView {
                 dragState = nil; startLink(); return
             }
             if case .app(let path, _) = dragged {
+                if let g = targetGroup(), let info = AppInfo.from(url: URL(fileURLWithPath: path)) {
+                    // 拖到分组上：放进分组（会从程序坞条上消失，出现在分组里）
+                    dropTarget = nil; dragState = nil
+                    GroupManager.shared.addApp(info, to: g)
+                    startLink(); return
+                }
                 if outsideBar(d.y) {
                     poof(at: p)
                     dragState = nil
@@ -735,13 +753,7 @@ final class DockBarView: NSView {
         case .app(let path, _):
             if model.runningApp(path) == nil { bounce(e.id, path: path) }
             model.openOrSwitch(path)
-        case .group(let gid):
-            if let g = GroupManager.shared.groups.first(where: { $0.id == gid }), let w = window, let il = iconLayers[e.id] {
-                dgCustomDockTop = w.frame.minY + bottomMargin + barH + 2
-                let center = w.convertPoint(toScreen: NSPoint(x: il.position.x, y: 0))
-                dgPopupAnchorX = center.x
-                DockGroupsMain.delegate.menuBarManager?.showGroupPopup(for: g)
-            }
+        case .group(let gid): openGroup(gid)
         case .trash:
             CustomDockModel.finder("open trash\nactivate")
         case .divider: break
@@ -755,6 +767,7 @@ final class DockBarView: NSView {
         switch model.entries[i] {
         case .app(let path, let pinned): menu = buildAppMenu(path: path, pinned: pinned)
         case .trash: menu = buildTrashMenu()
+        case .group(let gid): menu = buildGroupMenu(gid)
         default: return
         }
         // 菜单位置对每个图标固定：左边对齐图标左边缘、向右上方展开，底边在"放大到最大的图标"顶部上方 6pt。
@@ -804,6 +817,54 @@ final class DockBarView: NSView {
                   let name = w[kCGWindowName as String] as? String, !name.isEmpty else { return nil }
             return name
         }
+    }
+
+    func openGroup(_ gid: UUID) {
+        guard let g = GroupManager.shared.groups.first(where: { $0.id == gid }), let w = window, let il = iconLayers["group:" + gid.uuidString] else { return }
+        dgCustomDockTop = w.frame.minY + bottomMargin + barH + 2
+        dgPopupAnchorX = w.convertPoint(toScreen: NSPoint(x: il.position.x, y: 0)).x
+        DockGroupsMain.delegate.menuBarManager?.showGroupPopup(for: g)
+    }
+
+    func buildGroupMenu(_ gid: UUID) -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(ClosureMenuItem(title: "打开") { [weak self] in self?.openGroup(gid) })
+        menu.addItem(ClosureMenuItem(title: "重命名…") {
+            guard var g = GroupManager.shared.groups.first(where: { $0.id == gid }) else { return }
+            let a = NSAlert(); a.messageText = "重命名分组"
+            let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24)); f.stringValue = g.name
+            a.accessoryView = f; a.addButton(withTitle: "好"); a.addButton(withTitle: "取消")
+            a.window.initialFirstResponder = f
+            NSApp.activate(ignoringOtherApps: true)
+            if a.runModal() == .alertFirstButtonReturn {
+                let n = f.stringValue.trimmingCharacters(in: .whitespaces)
+                if !n.isEmpty { g.name = n; GroupManager.shared.updateGroup(g) }
+            }
+        })
+        menu.addItem(ClosureMenuItem(title: "管理分组…") { NotificationCenter.default.post(name: .dgOpenSettings, object: nil) })
+        menu.addItem(.separator())
+        menu.addItem(ClosureMenuItem(title: "移除分组") {
+            guard let g = GroupManager.shared.groups.first(where: { $0.id == gid }) else { return }
+            let a = NSAlert(); a.messageText = "移除分组「\(g.name)」？"
+            a.informativeText = "只是解散这个分组，里面的应用不会被删除。"
+            a.addButton(withTitle: "移除"); a.addButton(withTitle: "取消")
+            NSApp.activate(ignoringOtherApps: true)
+            if a.runModal() == .alertFirstButtonReturn { GroupManager.shared.deleteGroup(g) }
+        })
+        return menu
+    }
+
+    static func isGroup(_ e: DockEntry) -> Bool { if case .group = e { return true }; return false }
+    // 光标是否压在某个图标的中心区域；已选中的目标范围放宽一点，避免在边界来回跳
+    func centerHit(_ x: CGFloat, _ ok: (DockEntry) -> Bool) -> String? {
+        for e in model.entries where ok(e) {
+            if let c = dispX[e.id], abs(x - c) < S * (dropTarget == e.id ? 0.48 : 0.28) { return e.id }
+        }
+        return nil
+    }
+    func targetGroup() -> AppGroup? {
+        guard let t = dropTarget, t.hasPrefix("group:"), let gid = UUID(uuidString: String(t.dropFirst(6))) else { return nil }
+        return GroupManager.shared.groups.first { $0.id == gid }
     }
 
     func buildTrashMenu() -> NSMenu {
@@ -888,17 +949,42 @@ final class DockBarView: NSView {
         return urls.filter { $0.pathExtension == "app" }.map { CustomDockModel.norm($0.path) }
     }
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { draggingUpdated(sender) }
-    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard !draggedApps(sender).isEmpty, slide < 0.5 else { return [] }
-        let p = convert(sender.draggingLocation, from: nil)
-        dropInsert = insertIndex(for: p.x, excluding: "", list: model.entries)
-        reordering = true
-        startLink()
-        return .link
+    private func draggedFiles(_ info: NSDraggingInfo) -> [URL] {
+        info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
     }
-    override func draggingExited(_ sender: NSDraggingInfo?) { dropInsert = nil; startLink() }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard slide < 0.5 else { return [] }
+        let p = convert(sender.draggingLocation, from: nil)
+        if !draggedApps(sender).isEmpty {
+            // .app：压在分组中心 = 放进分组（此时不再挪动占位）；否则 = 固定到程序坞的这个位置
+            if let t = centerHit(p.x, Self.isGroup) { dropTarget = t; startLink(); return .copy }
+            dropTarget = nil
+            dropInsert = insertIndex(for: p.x, excluding: "", list: model.entries)
+            reordering = true
+            startLink()
+            return .link
+        }
+        // 普通文件：拖到应用图标上 = 用这个应用打开
+        if !draggedFiles(sender).isEmpty, let i = index(at: p), case .app = model.entries[i] {
+            dropTarget = model.entries[i].id; startLink(); return .generic
+        }
+        dropTarget = nil; startLink()
+        return []
+    }
+    override func draggingExited(_ sender: NSDraggingInfo?) { dropInsert = nil; dropTarget = nil; startLink() }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let target = dropTarget, group = targetGroup()
+        dropTarget = nil
         let apps = draggedApps(sender)
+        if let g = group {
+            dropInsert = nil
+            for a in apps { if let info = AppInfo.from(url: URL(fileURLWithPath: a)) { GroupManager.shared.addApp(info, to: g) } }
+            startLink(); return true
+        }
+        if let t = target, t.hasPrefix("app:") {
+            NSWorkspace.shared.open(draggedFiles(sender), withApplicationAt: URL(fileURLWithPath: String(t.dropFirst(4))), configuration: NSWorkspace.OpenConfiguration())
+            startLink(); return true
+        }
         guard !apps.isEmpty else { return false }
         let ins = dropInsert ?? model.entries.count
         dropInsert = nil
