@@ -197,6 +197,7 @@ struct GroupPopupView: View {
                             // 拖出面板：面板内的内容出不了窗口，改用一个跟着光标的小浮窗显示图标；此时不再排序
                             let mouse = NSEvent.mouseLocation
                             draggedOut = !(window?.frame.contains(mouse) ?? true)
+                            CustomDockController.shared.groupDragMoved(at: draggedOut ? mouse : nil)
                             if draggedOut { DragGhost.show(icons[app.id], at: mouse); return } else { DragGhost.hide() }
                             guard let from = apps.firstIndex(where: { $0.id == app.id }) else { return }
                             let col = min(max(Int(v.location.x / GroupPopupWindow.cellW), 0), cols - 1)

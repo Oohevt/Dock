@@ -1250,12 +1250,23 @@ final class CustomDockController {
     }
     private func popupOpen() -> Bool { NSApp.windows.contains { $0 is GroupPopupWindow && $0.isVisible } }
 
-    // 从分组面板里拖出来的应用：落在程序坞条上就插到那个位置，否则排到最后
+    // 从分组面板里往外拖应用。拖动中：光标在程序坞条上就让其他图标让出空位（at 为 nil 表示拖动结束/回到面板内）
+    func groupDragMoved(at screen: NSPoint?) {
+        guard let p = panel, let v = bar else { return }
+        var ins: Int? = nil
+        if let s = screen {
+            let local = v.convert(p.convertPoint(fromScreen: s), from: nil)
+            if p.frame.contains(s) && local.y < v.bottomMargin + v.barH + 30 { ins = v.insertIndex(for: local.x, excluding: "", list: v.model.entries) }
+        }
+        if ins != v.dropInsert { v.dropInsert = ins; v.reordering = true; v.startLink() }
+    }
+    // 松手：落在程序坞条上就插到让出的空位，否则排到最后
     func dropFromGroup(_ path: String, at screen: NSPoint) {
-        guard let p = panel, let v = bar else { CustomDockModel.shared.pin(path); return }
-        let local = v.convert(p.convertPoint(fromScreen: screen), from: nil)
-        let onBar = p.frame.contains(screen) && local.y < v.bottomMargin + v.barH + 30
-        v.pin([path], atEntryIndex: onBar ? v.insertIndex(for: local.x, excluding: "", list: v.model.entries) : v.model.entries.count)
+        guard let v = bar else { CustomDockModel.shared.pin(path); return }
+        groupDragMoved(at: screen)
+        let ins = v.dropInsert ?? v.model.entries.count
+        v.dropInsert = nil
+        v.pin([path], atEntryIndex: ins)
         v.startLink()
     }
 
