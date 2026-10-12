@@ -810,15 +810,6 @@ final class DockBarView: NSView {
         m.addItem(NSMenuItem(title: "B", action: nil, keyEquivalent: "")); return m.size.height - one
     }()
 
-    func windowTitles(pid: pid_t) -> [String] {
-        guard let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
-        return list.compactMap { w in
-            guard (w[kCGWindowOwnerPID as String] as? pid_t) == pid, (w[kCGWindowLayer as String] as? Int) == 0,
-                  let name = w[kCGWindowName as String] as? String, !name.isEmpty else { return nil }
-            return name
-        }
-    }
-
     func openGroup(_ gid: UUID) {
         guard let g = GroupManager.shared.groups.first(where: { $0.id == gid }), let w = window, let il = iconLayers["group:" + gid.uuidString] else { return }
         dgCustomDockTop = w.frame.minY + bottomMargin + barH + 2
@@ -886,9 +877,19 @@ final class DockBarView: NSView {
         let run = model.runningApp(path)
         func item(_ t: String, _ f: @escaping () -> Void) -> NSMenuItem { let it = ClosureMenuItem(title: t, action: f); return it }
         if let r = run {
-            let titles = windowTitles(pid: r.processIdentifier)
-            for t in titles.prefix(12) { menu.addItem(item(t) { [weak self] in self?.model.openOrSwitch(path) }) }
-            if !titles.isEmpty { menu.addItem(.separator()) }
+            let pid = r.processIdentifier
+            if AppWindows.trusted {
+                // 窗口列表：点哪个切到哪个（已最小化的会还原）
+                let ws = AppWindows.list(pid: pid)
+                for w in ws.prefix(12) {
+                    let t = w.title.count > 36 ? String(w.title.prefix(36)) + "…" : w.title
+                    menu.addItem(item(w.minimized ? t + "（已最小化）" : t) { AppWindows.focus(w, pid: pid) })
+                }
+                if !ws.isEmpty { menu.addItem(.separator()) }
+            } else {
+                menu.addItem(item("允许显示窗口列表…") { AppWindows.requestTrust() })
+                menu.addItem(.separator())
+            }
         }
         // 选项 子菜单
         let opt = NSMenu()
@@ -908,7 +909,9 @@ final class DockBarView: NSView {
         menu.addItem(optItem)
         menu.addItem(.separator())
         if let r = run {
-            menu.addItem(item("显示所有窗口") { [weak self] in r.unhide(); self?.model.openOrSwitch(path) })
+            menu.addItem(item("显示所有窗口") { [weak self] in
+                if !AppWindows.exposeWindows(of: r) { r.unhide(); self?.model.openOrSwitch(path) }
+            })
             menu.addItem(item(r.isHidden ? "显示" : "隐藏") { if r.isHidden { r.unhide() } else { r.hide() } })
             if path != model.finderPath {
                 let q = item("退出") { r.terminate() }
@@ -964,9 +967,13 @@ final class DockBarView: NSView {
             startLink()
             return .link
         }
-        // 普通文件：拖到应用图标上 = 用这个应用打开
-        if !draggedFiles(sender).isEmpty, let i = index(at: p), case .app = model.entries[i] {
-            dropTarget = model.entries[i].id; startLink(); return .generic
+        // 普通文件：拖到应用图标上 = 用这个应用打开；拖到废纸篓上 = 扔进废纸篓
+        if !draggedFiles(sender).isEmpty, let i = index(at: p) {
+            switch model.entries[i] {
+            case .app: dropTarget = model.entries[i].id; startLink(); return .generic
+            case .trash: dropTarget = "trash"; startLink(); return .delete
+            default: break
+            }
         }
         dropTarget = nil; startLink()
         return []
@@ -979,6 +986,12 @@ final class DockBarView: NSView {
         if let g = group {
             dropInsert = nil
             for a in apps { if let info = AppInfo.from(url: URL(fileURLWithPath: a)) { GroupManager.shared.addApp(info, to: g) } }
+            startLink(); return true
+        }
+        if target == "trash" {
+            // 交给访达删（进废纸篓，可以"放回原处"）：访达自带各文件夹的权限，也不会弹我们自己的授权
+            let list = draggedFiles(sender).map { "POSIX file " + CustomDockModel.asQuote($0.path) }.joined(separator: ", ")
+            CustomDockModel.finder("delete {\(list)}") { CustomDockModel.refreshTrash { [weak self] in self?.reloadIcons() } }
             startLink(); return true
         }
         if let t = target, t.hasPrefix("app:") {
@@ -1069,6 +1082,7 @@ extension CustomDockModel {
     }
     // 废纸篓空/满：系统不让直接读 ~/.Trash（要"完全磁盘访问权限"），改问访达（首次弹一次"自动化"授权）
     static var trashFull = false
+    static func asQuote(_ s: String) -> String { "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\"" }
     // 废纸篓的操作都交给访达（直接打开 ~/.Trash 同样会被系统拦下）
     static func finder(_ cmd: String, then: (() -> Void)? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1153,8 +1167,22 @@ final class CustomDockController {
         timer?.invalidate(); timer = nil; panel?.orderOut(nil); panel = nil; bar = nil; dgCustomDockTop = nil }
 
     // 窗口固定全屏宽、足够高（容纳放大和标签），只有图标区域接收点击
-    private func frameWindow() {
-        guard let p = panel, let v = bar, let screen = NSScreen.screens.first else { return }
+    private var dockDisplay: CGDirectDisplayID?
+    static func displayID(_ s: NSScreen) -> CGDirectDisplayID { (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0 }
+    // 程序坞当前在哪块屏幕上（那块屏幕被拔掉就回到主屏）
+    private var dockScreen: NSScreen { NSScreen.screens.first { Self.displayID($0) == dockDisplay } ?? NSScreen.screens.first ?? NSScreen.main! }
+    // 鼠标是否贴在某块屏幕的底边（上下叠放的两块屏幕之间的交界不算）
+    private func edgeScreen(_ m: NSPoint) -> NSScreen? {
+        NSScreen.screens.first { s in
+            let f = s.frame
+            return m.x >= f.minX && m.x <= f.maxX && m.y <= f.minY + 2 && m.y >= f.minY - 1
+                && !NSScreen.screens.contains { $0 !== s && $0.frame.contains(NSPoint(x: m.x, y: f.minY - 1)) }
+        }
+    }
+
+    private func frameWindow(moved: Bool = false) {
+        guard let p = panel, let v = bar else { return }
+        let screen = dockScreen
         let f = screen.frame
         let h = v.L + 60
         let y = f.minY
@@ -1162,9 +1190,10 @@ final class CustomDockController {
         let w = min(f.width, (v.baseWidth + (v.L - v.S) * 3 + 300).rounded())
         let nf = NSRect(x: (f.midX - w / 2).rounded(), y: y, width: w, height: h)
         if nf == p.frame { return }
-        let dx = p.frame.width > 0 ? p.frame.minX - nf.minX : 0
+        let dx = (moved || p.frame.width == 0) ? 0 : p.frame.minX - nf.minX   // 换屏幕时图标的窗口内坐标不变，不用补偿
         p.setFrame(nf, display: true)
         v.shiftX(dx)
+        if moved { v.startLink() }
         p.ignoresMouseEvents = false
     }
 
@@ -1205,9 +1234,17 @@ final class CustomDockController {
     }
 
     private func tick() {
-        guard let p = panel, let v = bar, let screen = NSScreen.screens.first else { return }
+        guard let p = panel, let v = bar else { return }
         let m = NSEvent.mouseLocation
-        let atEdge = m.y <= screen.frame.minY + 2 && m.x >= screen.frame.minX && m.x <= screen.frame.maxX
+        // 自动隐藏时：鼠标推到另一块屏幕的底边，程序坞跟过去（和系统一样）
+        if autoHide, let es = edgeScreen(m), Self.displayID(es) != Self.displayID(dockScreen), v.dragState == nil, !v.menuOpen {
+            dockDisplay = Self.displayID(es)
+            shown = false; v.slide = 1; v.slideTarget = 1; v.mouseX = nil
+            frameWindow(moved: true)
+            edgeSince = nil
+        }
+        let screen = dockScreen
+        let atEdge = edgeScreen(m).map { Self.displayID($0) == Self.displayID(screen) } ?? false
         // 已收起且鼠标不在底边：直接返回
         if !shown && !atEdge && !inExpose && p.ignoresMouseEvents && autoHide { edgeSince = nil; return }
         // 查窗口列表一次约 1ms：只在可见或即将唤出时查，最多 0.3s 一次
@@ -1358,6 +1395,43 @@ enum LoginItems {
 
 
 // 图标缓存：系统图标 / 自定义覆盖（如 ChatGPT 运行时图标），始终用最大分辨率源
+// 窗口列表和"显示所有窗口"
+enum AppWindows {
+    struct Item { let title: String; let element: AXUIElement; let minimized: Bool }
+    static var trusted: Bool { AXIsProcessTrusted() }
+    // 弹出系统的"辅助功能"授权提示（授权一次即可；签名固定后重装不丢）
+    static func requestTrust() { _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) }
+
+    static func list(pid: pid_t) -> [Item] {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.25)   // 应用卡死时最多等 0.25s，不能把程序坞也拖住
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &raw) == .success, let wins = raw as? [AXUIElement] else { return [] }
+        return wins.compactMap { w in
+            func attr(_ a: String) -> CFTypeRef? { var v: CFTypeRef?; return AXUIElementCopyAttributeValue(w, a as CFString, &v) == .success ? v : nil }
+            guard (attr(kAXRoleAttribute) as? String) == kAXWindowRole, let t = attr(kAXTitleAttribute) as? String, !t.isEmpty else { return nil }
+            return Item(title: t, element: w, minimized: (attr(kAXMinimizedAttribute) as? Bool) ?? false)
+        }
+    }
+
+    static func focus(_ item: Item, pid: pid_t) {
+        if item.minimized { AXUIElementSetAttributeValue(item.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
+        AXUIElementPerformAction(item.element, kAXRaiseAction as CFString)
+        NSRunningApplication(processIdentifier: pid)?.activate()
+    }
+
+    // 和系统程序坞的"显示所有窗口"一样：进入这个应用的 App Exposé（私有接口，不需要授权；找不到就返回 false 走普通切换）
+    private typealias CoreDockSend = @convention(c) (CFString, Int32) -> Void
+    static func exposeWindows(of app: NSRunningApplication) -> Bool {
+        _ = dlopen("/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices", RTLD_LAZY)
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CoreDockSendNotification") else { return false }
+        let send = unsafeBitCast(sym, to: CoreDockSend.self)
+        app.unhide(); app.activate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { send("com.apple.expose.front.awake" as CFString, 0) }
+        return true
+    }
+}
+
 // 私有 LaunchServices 接口：应用通过 dockTile.badgeLabel 设的角标存在这里的 StatusLabel 里
 enum AppBadge {
     private typealias ASNCreate = @convention(c) (CFAllocator?, pid_t) -> Unmanaged<CFTypeRef>?

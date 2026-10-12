@@ -32,11 +32,24 @@ class GroupPopupWindow: NSWindow {
     static let cols = 3
     static let cellW: CGFloat = 92, cellH: CGFloat = 94, pad: CGFloat = 18, titleH: CGFloat = 40, radius: CGFloat = 26
     
+    static func size(count: Int) -> NSSize {
+        let rows = max(1, Int(ceil(Double(count) / Double(cols))))
+        let c = min(cols, max(count, 1))
+        return NSSize(width: max(CGFloat(c) * cellW + pad * 2, 220), height: titleH + CGFloat(rows) * cellH + pad + 18)
+    }
+
+    // 应用被移出后收紧面板：底边和水平中心不动
+    func fit(count: Int) {
+        if count == 0 { close(); return }
+        let s = Self.size(count: count), f = frame
+        guard abs(s.width - f.width) > 0.5 || abs(s.height - f.height) > 0.5 else { return }
+        var x = f.midX - s.width / 2
+        if let sc = screen?.frame { x = min(max(x, sc.minX + 8), sc.maxX - s.width - 8) }
+        setFrame(NSRect(x: x, y: f.minY, width: s.width, height: s.height), display: true, animate: true)
+    }
+
     private func setupContent() {
-        let rows = max(1, Int(ceil(Double(group.apps.count) / Double(Self.cols))))
-        let cols = min(Self.cols, max(group.apps.count, 1))
-        let w = max(CGFloat(cols) * Self.cellW + Self.pad * 2, 220)
-        let h = Self.titleH + CGFloat(rows) * Self.cellH + Self.pad + 18
+        let w = Self.size(count: group.apps.count).width, h = Self.size(count: group.apps.count).height
         // 锚点：点击时鼠标位置（Dock 图标处）
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main!
@@ -215,6 +228,7 @@ struct GroupPopupView: View {
                                 draggedOut = false
                                 apps.removeAll { $0.id == app.id }
                                 GroupManager.shared.removeApp(app, from: group)
+                                (window as? GroupPopupWindow)?.fit(count: apps.count)
                                 CustomDockController.shared.dropFromGroup(CustomDockModel.norm(app.path), at: NSEvent.mouseLocation)
                             } else {
                                 GroupManager.shared.reorderApps(apps, in: group)
@@ -234,6 +248,7 @@ struct GroupPopupView: View {
                         Button("从分组移除") {
                             apps.removeAll { $0.id == app.id }
                             GroupManager.shared.removeApp(app, from: group)
+                            (window as? GroupPopupWindow)?.fit(count: apps.count)
                         }
                     }
                 }
