@@ -757,15 +757,20 @@ final class DockBarView: NSView {
         case .trash: menu = buildTrashMenu()
         default: return
         }
-        // 像系统程序坞一样：菜单贴着图标正上方、水平居中。
+        // 菜单位置对每个图标固定：左边对齐图标左边缘、向右上方展开，底边在"放大到最大的图标"顶部上方 6pt。
+        // 按图标的静止槽位算，不读图层当前的 frame —— 那是动画中的瞬时值（放大、切换图标时都在变），会让菜单忽左忽右
         // menu.size 把"按住 Option 才出现"的替换项（强制退出）也算成一行，要减掉，否则菜单会飘高一截
-        let size = menu.size
         let extra = menu.items.filter { $0.isAlternate || $0.isHidden }.count
-        let h = size.height - CGFloat(extra) * Self.menuRowHeight
-        let pt = NSPoint(x: il.position.x - size.width / 2, y: il.frame.maxY + h)
+        let h = menu.size.height - CGFloat(extra) * Self.menuRowHeight
+        let inset: CGFloat = 0.095   // 图标图案在格子里四周的留白比例
+        let pt = NSPoint(x: restCenter(i) - S / 2 + S * inset,
+                         y: bottomMargin + NativeDock.iconBaseY + L * (1 - inset) + 6 + h - 4.5)   // AppKit 实际会把菜单再抬高约 4.5pt
+        // 先把放大状态一步定到位（以当前鼠标为中心），菜单打开后图标不再变化
+        mouseX = p.x; magAmount = magnify ? 1 : 0
+        _ = step(dt: 1.0 / 120); applyLayout()
         // 菜单打开期间不显示名称提示：否则提示会被逐帧刷新重新显示，叠在菜单后面
         menuOpen = true; tipBg.opacity = 0
-        menu.popUp(positioning: nil, at: convert(pt, from: iconHost), in: self)
+        menu.popUp(positioning: nil, at: pt, in: self)
         menuOpen = false
         // 菜单关闭后按鼠标当前位置重新决定是否放大
         if let w = window {
@@ -773,6 +778,17 @@ final class DockBarView: NSView {
             mouseX = (bounds.contains(q) && q.y <= bottomMargin + barH + (L - S) + 10) ? q.x : nil
         }
         startLink()
+    }
+
+    // 第 i 个条目不放大时的中心 x
+    func restCenter(_ i: Int) -> CGFloat {
+        var x = (bounds.width - baseWidth) / 2 + barPadX
+        for (k, e) in model.entries.enumerated() {
+            let isDiv: Bool = { if case .divider = e { return true }; return false }()
+            if k == i { return x + S / 2 }
+            x += isDiv ? 13 : S + gap
+        }
+        return x
     }
 
     static let menuRowHeight: CGFloat = {
