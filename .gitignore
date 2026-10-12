@@ -1,0 +1,26 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+.DS_Store
+
+# Build outputs
+DockGroups.app
+*.app
+
+# User data (for testing)
+TestData/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Debug screenshots
+shots/
