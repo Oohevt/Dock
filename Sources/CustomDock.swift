@@ -766,12 +766,18 @@ final class DockBarView: NSView {
             wantGlass = gf
             let steady = mouseX != nil && magAmount > 0.98 && slide == slideTarget && !reordering && dragState == nil
             let tol: CGFloat = steady ? 1.5 : 0.25
+            // 拉伸会让玻璃的圆角跟着变形（宽 5% 就差 1 个多点），和阴影的圆角错开成"双层边"。所以拉伸只在放大/滑动的过渡动画里用；
+            // 一进入稳定悬停就立刻换回真实尺寸，之后每次更新（1.5pt 的门槛下大约每秒一次）也直接改真实尺寸
+            if steady && glassStretched {
+                glass.layer?.setAffineTransform(.identity); glass.frame = gf; glassBase = gf; lastGlass = gf; glassStretched = false
+                barShadow.frame = gf.insetBy(dx: -Self.shadowPad, dy: -Self.shadowPad)
+            }
             if abs(gf.minX - lastGlass.minX) > tol || abs(gf.maxX - lastGlass.maxX) > tol || abs(gf.minY - lastGlass.minY) > 0.25 {
                 lastGlass = gf
                 // 动画过程中不改玻璃的真实尺寸，只做拉伸/平移变形：NSGlassEffectView 每改一次尺寸内部都要重新布局一遍（约 1ms），
                 // 悬停时宽度每帧都在微调，实测让 CPU 是系统程序坞的 4 倍（21% 对 5%）。拉伸幅度只有百分之几，圆角看不出变形；动画停下时再对齐真实尺寸
                 let sx = glassBase.width > 0 ? gf.width / glassBase.width : 0
-                if glassBase.width == 0 || abs(sx - 1) > 0.12 || abs(gf.height - glassBase.height) > 0.01 {
+                if steady || glassBase.width == 0 || abs(sx - 1) > 0.12 || abs(gf.height - glassBase.height) > 0.01 {
                     glass.layer?.setAffineTransform(.identity); glass.frame = gf; glassBase = gf; glassStretched = false
                 } else if let gl = glass.layer {
                     let ax = gl.anchorPoint.x * glassBase.width
