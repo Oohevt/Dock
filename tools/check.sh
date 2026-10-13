@@ -24,7 +24,9 @@ MARK=$(wc -l < "$LOG")
 # 用 URL 触发会让 DockGroups 变成最前面的应用（之后鼠标移动会多约 4% CPU），测完把焦点还给原来的应用
 FRONT=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null)
 open "dockgroups://selfcheck"; sleep 1.5
-[ -n "$FRONT" ] && [ "$FRONT" != "DockGroups" ] && osascript -e "tell application \"$FRONT\" to activate" 2>/dev/null; sleep 1
+[ -n "$FRONT" ] && [ "$FRONT" != "DockGroups" ] && osascript -e "tell application \"$FRONT\" to activate" 2>/dev/null
+# 等焦点真的还回去再量 CPU（最多 5 秒），否则下面"鼠标移动时的 CPU"会偶尔偏高
+for i in $(seq 1 25); do lsappinfo info -only name "$(lsappinfo front)" | grep -q DockGroups || break; sleep 0.2; done; sleep 1
 tail -n +$((MARK+1)) "$LOG" | grep "selfcheck:" | while read -r l; do echo "     ${l#* +0000 }"; done
 tail -n +$((MARK+1)) "$LOG" | grep -q "selfcheck: done, 0 failed"; chk $? "自检全部通过（accessibility 未授权会算失败）"
 
