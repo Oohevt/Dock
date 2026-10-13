@@ -126,8 +126,17 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         let window = GroupPopupWindow(group: group)
         currentPopup = window
         dgRememberFrontApp()
+        // 淡入 + 从下方 8pt 升上来，而不是突然出现
+        let final = window.frame
+        window.alphaValue = 0
+        window.setFrame(final.offsetBy(dx: 0, dy: -8), display: false)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        NSAnimationContext.runAnimationGroup { c in
+            c.duration = 0.14; c.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().alphaValue = 1
+            window.animator().setFrame(final, display: true)
+        }
     }
     
     @objc private func toggleHideIcon() {

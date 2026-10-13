@@ -494,7 +494,8 @@ final class DockBarView: NSView {
     var dragState: DragState? = nil
     var dropInsert: Int? = nil       // 外部拖入时的插入位置（条目索引）
 
-    struct DragState { var id: String; var index: Int; var x: CGFloat; var y: CGFloat; var startX: CGFloat; var startY: CGFloat; var active: Bool }
+    // x/y = 被拖图标的中心；offX/offY = 按下时光标相对图标中心的偏移（抓哪儿就拖哪儿，图标不会跳到光标正中）
+    struct DragState { var id: String; var index: Int; var x: CGFloat; var y: CGFloat; var startX: CGFloat; var startY: CGFloat; var active: Bool; var offX: CGFloat = 0; var offY: CGFloat = 0 }
 
     func startLink() {
         guard link == nil else { return }
@@ -676,6 +677,7 @@ final class DockBarView: NSView {
             il.bounds = CGRect(x: 0, y: 0, width: w, height: w)
             il.position = CGPoint(x: c, y: barY + NativeDock.iconBaseY)
             il.opacity = 1; il.zPosition = 0
+            if pressDim.superlayer === il { pressDim.frame = il.bounds; pressMask.frame = il.bounds }
             il.setAffineTransform(e.id == dropTarget ? CGAffineTransform(scaleX: 1.12, y: 1.12) : .identity)   // 拖放目标：微微鼓起
             if let b = badgeLayers[e.id] {
                 // 贴在图标右上角，跟着放大一起变大
@@ -749,22 +751,46 @@ final class DockBarView: NSView {
             var draggable = false
             if case .app = e, i > 0 { draggable = true }   // 包括分隔线右边"在运行但没固定"的应用；访达（第 0 个）不能动
             if case .group = e { draggable = true }
-            if draggable { dragState = DragState(id: e.id, index: i, x: p.x, y: p.y, startX: p.x, startY: p.y, active: false) }
+            if draggable {
+                var d = DragState(id: e.id, index: i, x: p.x, y: p.y, startX: p.x, startY: p.y, active: false)
+                if let il = iconLayers[e.id], il.bounds.width > 1 {
+                    let k = S / il.bounds.width   // 按下时图标可能是放大的，拖起来会缩回原大小，偏移按比例缩
+                    d.offX = (p.x - il.position.x) * k; d.offY = (p.y - il.frame.midY) * k
+                }
+                dragState = d
+            }
+            setPressed(e.id)
         }
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard var d = dragState else { return }
         let p = convert(event.locationInWindow, from: nil)
-        d.x = p.x; d.y = p.y
-        if !d.active && hypot(p.x - d.startX, p.y - d.startY) > 6 { d.active = true; reordering = true; mouseX = nil; tipBg.opacity = 0 }
+        d.x = p.x - d.offX; d.y = p.y - d.offY
+        if !d.active && hypot(p.x - d.startX, p.y - d.startY) > 6 { d.active = true; reordering = true; mouseX = nil; tipBg.opacity = 0; setPressed(nil) }
         dragState = d
         dropTarget = (d.active && d.id.hasPrefix("app:") && !outsideBar(p.y)) ? centerHit(p.x, Self.isGroup) : nil
         if d.active { NSCursor.current.set(); if outsideBar(p.y) && d.id.hasPrefix("app:") && !isUnpinned(d.id) { NSCursor.disappearingItem.set() } else { NSCursor.arrow.set() } }
         startLink()
     }
 
+    // 按下时把图标压暗一点（和系统程序坞一样），松手或开始拖动时恢复
+    private let pressDim = CALayer(), pressMask = CALayer()
+    func setPressed(_ id: String?) {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        pressDim.removeFromSuperlayer()
+        if let id = id, let il = iconLayers[id] {
+            pressDim.backgroundColor = NSColor(white: 0, alpha: 0.3).cgColor
+            pressMask.contents = il.contents; pressMask.contentsGravity = il.contentsGravity   // 只压暗图标本身的形状，不是整个方块
+            pressDim.frame = il.bounds; pressMask.frame = il.bounds
+            pressDim.mask = pressMask
+            il.addSublayer(pressDim)
+        }
+        CATransaction.commit()
+    }
+
     override func mouseUp(with event: NSEvent) {
+        setPressed(nil)
         let p = convert(event.locationInWindow, from: nil)
         defer { dropTarget = nil }
         if let d = dragState, d.active {
@@ -1218,9 +1244,9 @@ final class CustomDockController {
         v.reloadIcons()
         p.orderFrontRegardless()
         shown = true
-        // 30Hz 轮询鼠标位置决定显示/隐藏（唤出最多晚 33ms）。不用全局鼠标监听：
+        // 60Hz 轮询鼠标位置决定显示/隐藏（唤出最多晚 17ms；收起状态下每次只是取一下鼠标位置）。不用全局鼠标监听：
         // 那样鼠标在屏幕任何地方移动，每个事件都要投递给本进程，实测占 4% CPU
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.tick() }
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(timer!, forMode: .common)
         // 分辨率/显示器变化：重新读屏幕信息、重新定位
         refreshScreens()
@@ -1304,7 +1330,12 @@ final class CustomDockController {
         let dock = dockInfo
         let atEdge = edgeDisplay(m) == dock.id
         // 已收起且鼠标不在底边：直接返回
-        if !shown && !atEdge && p.ignoresMouseEvents && autoHide { edgeSince = nil; return }
+        if !shown && !atEdge && p.ignoresMouseEvents && autoHide {
+            edgeSince = nil
+            // 鼠标离底边还远（> 150pt）就查慢一点（20Hz），靠近了才用 60Hz：空闲时少被唤醒，唤出照样跟手
+            if m.y - dock.frame.minY > 150 { timer?.fireDate = Date(timeIntervalSinceNow: 1.0 / 20) }
+            return
+        }
         let now = Date()
         // 废纸篓状态只在程序坞看得见时才查，最多 10s 一次
         if shown && now.timeIntervalSince(lastTrashCheck) > 10 {
