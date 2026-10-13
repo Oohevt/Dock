@@ -241,6 +241,9 @@ final class DockBarView: NSView {
     var menuOpen = false                 // 右键菜单打开期间：保持放大、不收起、不显示名称提示
     private var tipSuppressed: String?   // 刚点过的图标不再显示名称提示（会和弹跳、分组面板叠在一起），鼠标移到别处才恢复
     private let glass: NSView
+    // 玻璃条（和它的阴影）放在单独一个窗口里，垫在图标窗口下面。原因：玻璃控件内部每次所在窗口刷新都要重算一遍（不管它自己变没变），
+    // 和图标同一个窗口的话，悬停放大时每帧都重算，实测 CPU 是系统程序坞的 4 倍。两个窗口大小位置完全相同，所以坐标可以直接通用
+    let glassHost = NSView()
     private let iconHost = NSView()
     override func hitTest(_ point: NSPoint) -> NSView? { frame.contains(point) ? self : nil }
     override func setFrameSize(_ newSize: NSSize) { super.setFrameSize(newSize); overlay.frame = bounds }
@@ -283,7 +286,8 @@ final class DockBarView: NSView {
         wantsLayer = true
         layer?.masksToBounds = false
         glass.wantsLayer = true
-        addSubview(glass)
+        glassHost.wantsLayer = true; glassHost.layer?.masksToBounds = false
+        glassHost.addSubview(glass)
         iconHost.wantsLayer = true
         iconHost.layer?.masksToBounds = false
         // 图标在玻璃之上而不是玻璃里面：玻璃会裁剪内容，放大的图标顶部会被切掉
@@ -318,7 +322,7 @@ final class DockBarView: NSView {
         barShadow.contents = img
         barShadow.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
         barShadow.contentsCenter = CGRect(x: 0.5 - 0.5 / side, y: 0.5 - 0.5 / side, width: 1 / side, height: 1 / side)
-        layer?.insertSublayer(barShadow, at: 0)
+        glassHost.layer?.insertSublayer(barShadow, at: 0)
         readSystemPrefs()
         setupDrop()
     }
@@ -560,7 +564,7 @@ final class DockBarView: NSView {
         lastTs = now
         let settled = step(dt: dt)
         applyLayout()
-        if settled { l.invalidate(); link = nil }
+        if settled { l.invalidate(); link = nil; settleAt = CACurrentMediaTime() + 0.25 }
     }
 
     var orderedEntries: [DockEntry] {
@@ -674,7 +678,22 @@ final class DockBarView: NSView {
     func layoutDock(animated: Bool) { startLink() }
 
     // 只改图层属性（关闭隐式动画）；玻璃视图仅在尺寸变化超过半像素时调整
-    var lastGlass = NSRect.zero
+    var lastGlass = NSRect.zero           // 玻璃条现在看起来的位置和大小
+    private var glassBase = NSRect.zero   // 玻璃视图真实的 frame（动画期间不动）
+    private var glassStretched = false
+    private var wantGlass = NSRect.zero   // 玻璃条按图标位置算出来"应该在"的精确位置（lastGlass 在悬停时允许有 1.5pt 以内的偏差）
+    private var settleAt: CFTimeInterval = 0
+    // 鼠标停下 0.25 秒后：把玻璃对齐到精确位置、去掉变形。必须延后做 —— 鼠标移动时动画是"每来一个事件跑一帧就停"，
+    // 如果一停就对齐，等于每帧都在改玻璃的真实尺寸，比不优化还慢。由控制器的定时器（60Hz）来调
+    func settleGlassIfDue() {
+        guard settleAt > 0, link == nil, CACurrentMediaTime() >= settleAt else { return }
+        settleAt = 0
+        guard glassStretched || wantGlass != lastGlass, wantGlass.width > 0 else { return }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        glass.layer?.setAffineTransform(.identity); glass.frame = wantGlass; glassBase = wantGlass; lastGlass = wantGlass; glassStretched = false
+        barShadow.frame = wantGlass.insetBy(dx: -Self.shadowPad, dy: -Self.shadowPad)
+        CATransaction.commit()
+    }
     func applyLayout() {
         let list = orderedEntries
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -689,8 +708,23 @@ final class DockBarView: NSView {
         }
         if minX < maxX {
             let gf = NSRect(x: ((minX - barPadX) * 2).rounded() / 2, y: (barY * 2).rounded() / 2, width: ((maxX - minX + barPadX * 2) * 2).rounded() / 2, height: barH)
-            if abs(gf.minX - lastGlass.minX) > 0.25 || abs(gf.width - lastGlass.width) > 0.25 || abs(gf.minY - lastGlass.minY) > 0.25 {
-                glass.frame = gf; lastGlass = gf
+            // 鼠标在条上滑动时，条的宽度每帧只变零点几个点（肉眼看不出），但每动一次玻璃都要重算；所以悬停期间攒够 1.5pt 才动。
+            // 进出放大、滑出滑入、拖动排序这些"真的在变"的时候不设门槛，保证跟手
+            wantGlass = gf
+            let steady = mouseX != nil && magAmount > 0.98 && slide == slideTarget && !reordering && dragState == nil
+            let tol: CGFloat = steady ? 1.5 : 0.25
+            if abs(gf.minX - lastGlass.minX) > tol || abs(gf.maxX - lastGlass.maxX) > tol || abs(gf.minY - lastGlass.minY) > 0.25 {
+                lastGlass = gf
+                // 动画过程中不改玻璃的真实尺寸，只做拉伸/平移变形：NSGlassEffectView 每改一次尺寸内部都要重新布局一遍（约 1ms），
+                // 悬停时宽度每帧都在微调，实测让 CPU 是系统程序坞的 4 倍（21% 对 5%）。拉伸幅度只有百分之几，圆角看不出变形；动画停下时再对齐真实尺寸
+                let sx = glassBase.width > 0 ? gf.width / glassBase.width : 0
+                if glassBase.width == 0 || abs(sx - 1) > 0.12 || abs(gf.height - glassBase.height) > 0.01 {
+                    glass.layer?.setAffineTransform(.identity); glass.frame = gf; glassBase = gf; glassStretched = false
+                } else if let gl = glass.layer {
+                    let ax = gl.anchorPoint.x * glassBase.width
+                    gl.setAffineTransform(CGAffineTransform(a: sx, b: 0, c: 0, d: 1, tx: gf.minX - glassBase.minX + ax * (sx - 1), ty: gf.minY - glassBase.minY))
+                    glassStretched = true
+                }
                 barShadow.frame = gf.insetBy(dx: -Self.shadowPad, dy: -Self.shadowPad)
             }
         }
@@ -757,7 +791,14 @@ final class DockBarView: NSView {
         let text = label(for: model.entries[i])
         // 箭头尖离图标顶 4pt
         let origin = { (w: CGFloat) in NSPoint(x: il.position.x - w / 2, y: il.frame.maxY + 4) }
-        if text == lastTip && !tip.isHidden { tip.setFrameOrigin(origin(tip.frame.width)); return }
+        if text == lastTip && !tip.isHidden {
+            // 跟着图标走：只挪图层（平移变形），不改视图的 frame —— 改 frame 会让整个窗口重新走一遍布局
+            let o = origin(tip.frame.width)
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            tip.layer?.setAffineTransform(CGAffineTransform(translationX: o.x - tip.frame.minX, y: o.y - tip.frame.minY))
+            CATransaction.commit()
+            return
+        }
         lastTip = text
         let pillH = Self.tipPillH, arrowH = Self.tipArrowH
         let w = ((text as NSString).size(withAttributes: [.font: Self.tipFont]).width + 26).rounded(.up)
@@ -765,6 +806,7 @@ final class DockBarView: NSView {
         tipLabel.contentsScale = window?.backingScaleFactor ?? 2
         tip.effectiveAppearance.performAsCurrentDrawingAppearance { tipLabel.foregroundColor = NSColor.labelColor.cgColor }   // 跟随浅色/深色外观
         tipLabel.frame = CGRect(x: 0, y: arrowH + (pillH - 17) / 2, width: w, height: 17)
+        tip.layer?.setAffineTransform(.identity)
         tip.frame = NSRect(origin: origin(w), size: NSSize(width: w, height: pillH + arrowH))
         // 胶囊 + 箭头是同一条轮廓：既当遮罩，也描一圈很淡的边（浅色背景上胶囊和背景同色，没有边就看不出来）
         let shape = CGMutablePath(); let cx = w / 2, by = arrowH
@@ -1296,12 +1338,22 @@ final class CustomDockController {
         // 我们自己的滑出速度跟随用户原来的设置（系统里现在那个值被我们故意改成了 1000，不能读它）
         if let m = ud.object(forKey: "origTimeModifier") as? Double, m > 0 { v.slideOmega = 14 / CGFloat(m) }
         p.contentView = v
+        // 玻璃窗口：同样的层级和行为，不接收鼠标，作为子窗口垫在下面（跟着主窗口一起移动和排序）
+        let gp = DockPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        gp.isReleasedWhenClosed = false
+        gp.isOpaque = false; gp.backgroundColor = .clear; gp.hasShadow = false
+        gp.level = p.level; gp.collectionBehavior = p.collectionBehavior
+        gp.hidesOnDeactivate = false; gp.ignoresMouseEvents = true
+        gp.contentView = v.glassHost
+        glassPanel = gp
         panel = p; bar = v
         v.onWidthChange = { [weak self] _ in self?.frameWindow() }
         frameWindow()
         _ = CustomDockModel.shared
         v.reloadIcons()
         p.orderFrontRegardless()
+        gp.orderFrontRegardless()
+        p.addChildWindow(gp, ordered: .below)
         shown = true
         // 60Hz 轮询鼠标位置决定显示/隐藏（唤出最多晚 17ms；收起状态下每次只是取一下鼠标位置）。不用全局鼠标监听：
         // 那样鼠标在屏幕任何地方移动，每个事件都要投递给本进程，实测占 4% CPU
@@ -1315,8 +1367,10 @@ final class CustomDockController {
     }
 
     private var screenObs: Any?
+    private var glassPanel: NSPanel?
     func stop() {
         if let o = screenObs { NotificationCenter.default.removeObserver(o); screenObs = nil }
+        if let g = glassPanel { panel?.removeChildWindow(g); g.orderOut(nil); glassPanel = nil }
         timer?.invalidate(); timer = nil; panel?.orderOut(nil); panel = nil; bar = nil; dgCustomDockTop = nil }
 
     // 窗口固定全屏宽、足够高（容纳放大和标签），只有图标区域接收点击
@@ -1352,6 +1406,7 @@ final class CustomDockController {
         if nf == p.frame { return }
         let dx = (moved || p.frame.width == 0) ? 0 : p.frame.minX - nf.minX   // 换屏幕时图标的窗口内坐标不变，不用补偿
         p.setFrame(nf, display: true)
+        glassPanel?.setFrame(nf, display: true)
         v.shiftX(dx)
         if moved { v.startLink() }
         p.ignoresMouseEvents = false
@@ -1402,6 +1457,7 @@ final class CustomDockController {
             lastTrashCheck = now
             CustomDockModel.refreshTrash { [weak self] in self?.bar?.reloadIcons() }
         }
+        v.settleGlassIfDue()
         // 有没有应用中途变成（或不再是）普通应用：2s 核对一次
         if now.timeIntervalSince(lastAppsCheck) > 2 { lastAppsCheck = now; CustomDockModel.shared.rebuildIfAppsChanged() }
         // 角标同理：只在看得见时查，1s 一次
