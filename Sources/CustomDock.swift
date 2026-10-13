@@ -261,14 +261,14 @@ final class DockBarView: NSView {
     // 名称提示：毛玻璃胶囊 + 朝下的小箭头（整体一个形状，用遮罩图裁出来）
     private let tip = NSVisualEffectView()
     // 文字用图层而不是文本控件：提示每帧都跟着图标移动，文本控件会每帧重画文字（实测占了悬停时一半的 CPU），图层只在换字时画一次
-    private let tipLabel = CATextLayer()
+    private let tipLabel = CALayer()   // 内容是预先画好的文字图片（按 外观+文字 缓存），换字时只换图，不用重新排版绘制
+    private var tipTextCache: [String: CGImage] = [:]
     static let tipFont = NSFont.systemFont(ofSize: 13, weight: .medium)
     private let tipOutline = CAShapeLayer()
     static let tipPillH: CGFloat = 26, tipArrowH: CGFloat = 6
     private let barShadow = CALayer()
     static let shadowPad: CGFloat = 30   // 阴影图比程序坞条四周各多出的宽度
     var mouseX: CGFloat? = nil
-    private var tracking: NSTrackingArea?
     private var pressedIndex: Int? = nil
     var onWidthChange: ((CGFloat) -> Void)?
 
@@ -303,7 +303,6 @@ final class DockBarView: NSView {
         tip.material = .menu; tip.blendingMode = .behindWindow; tip.state = .active
         tip.isHidden = true
         tip.wantsLayer = true
-        tipLabel.font = Self.tipFont; tipLabel.fontSize = 13; tipLabel.alignmentMode = .center
         tipLabel.actions = ["contents": NSNull(), "position": NSNull(), "bounds": NSNull()]
         tip.layer?.addSublayer(tipLabel)
         tipOutline.fillColor = nil; tipOutline.lineWidth = 0.5
@@ -342,12 +341,6 @@ final class DockBarView: NSView {
     }
 
     override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); reloadIcons() }
-
-    override func updateTrackingAreas() {
-        if let t = tracking { removeTrackingArea(t) }
-        tracking = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
-        addTrackingArea(tracking!)
-    }
 
     // 图标图像（按屏幕倍率生成，保证清晰）
     func image(for e: DockEntry) -> NSImage {
@@ -404,6 +397,7 @@ final class DockBarView: NSView {
     }
 
     func reloadIcons() {
+        restyleFrames = 4
         labelCache.removeAll()
         entryIDCache = model.entries.map { $0.id }
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
@@ -569,6 +563,7 @@ final class DockBarView: NSView {
 
     @objc func frameTick(_ l: CADisplayLink) {
         let now = l.timestamp
+        pollPointer()   // 定时器开着的时候每帧读一次鼠标位置
         if !dirty && idleSince > 0 {
             // 上一帧已经静止，之后也没有新变化：这一帧什么都不用做；静止满 0.3 秒就关掉定时器
             if now - idleSince > 0.3 { l.invalidate(); link = nil }
@@ -714,6 +709,7 @@ final class DockBarView: NSView {
     var lastGlass = NSRect.zero           // 玻璃条现在看起来的位置和大小
     private var glassBase = NSRect.zero   // 玻璃视图真实的 frame（动画期间不动）
     private var glassStretched = false
+    var restyleFrames = 4
     private var wantGlass = NSRect.zero   // 玻璃条按图标位置算出来"应该在"的精确位置（lastGlass 在悬停时允许有 1.5pt 以内的偏差）
     private var settleAt: CFTimeInterval = 0
     // 鼠标停下 0.25 秒后：把玻璃对齐到精确位置、去掉变形。必须延后做 —— 鼠标移动时动画是"每来一个事件跑一帧就停"，
@@ -734,6 +730,10 @@ final class DockBarView: NSView {
         let barY = bottomMargin - hideOffset
         var minX = CGFloat.greatestFiniteMagnitude, maxX = -CGFloat.greatestFiniteMagnitude
         let dragging = dragState?.active == true ? dragState!.id : nil
+        // 拖动期间以及结束后的几帧、图标列表刚刷新后：把样式类属性也重设一遍
+        if dragState != nil || dropTarget != nil || dropInsert != nil { restyleFrames = 4 }
+        let restyle = restyleFrames > 0
+        if restyle { restyleFrames -= 1 }
         for id in ids where id != dragging {
             let w = dispW[id] ?? S, c = dispX[id] ?? 0
             minX = min(minX, c - w / 2); maxX = max(maxX, c + w / 2)
@@ -781,19 +781,21 @@ final class DockBarView: NSView {
             }
             il.bounds = CGRect(x: 0, y: 0, width: w, height: w)
             il.position = CGPoint(x: c, y: barY + NativeDock.iconBaseY)
-            il.opacity = 1; il.zPosition = 0
             if pressDim.superlayer === il { pressDim.frame = il.bounds; pressMask.frame = il.bounds }
-            il.setAffineTransform(id == dropTarget ? CGAffineTransform(scaleX: 1.12, y: 1.12) : .identity)   // 拖放目标：微微鼓起
+            // 透明度/层级/鼓起/指示点显隐 这几样只在拖动前后才会变：平时每帧重设一遍是白费（每个图标每帧少 5 次图层调用）
+            if restyle {
+                il.opacity = 1; il.zPosition = 0
+                il.setAffineTransform(id == dropTarget ? CGAffineTransform(scaleX: 1.12, y: 1.12) : .identity)   // 拖放目标：微微鼓起
+                badgeLayers[id]?.opacity = 1
+                dotLayers[id]?.opacity = runningIDs.contains(id) ? 1 : 0
+            }
             if let b = badgeLayers[id] {
                 // 贴在图标右上角，跟着放大一起变大
                 let h = w * Self.badgeRatio, bw = h * (badgeAspect[id] ?? 1), inset = w * 0.02
                 b.frame = CGRect(x: c + w / 2 - inset - bw, y: barY + NativeDock.iconBaseY + w - inset - h, width: bw, height: h)
-                b.opacity = 1
             }
-            let running = runningIDs.contains(id)
             if let d = dotLayers[id] {
                 d.frame = CGRect(x: c - NativeDock.dotSize / 2, y: barY + NativeDock.dotY, width: NativeDock.dotSize, height: NativeDock.dotSize)
-                d.opacity = running ? 1 : 0
             }
         }
         CATransaction.commit()
@@ -869,9 +871,26 @@ final class DockBarView: NSView {
         lastTip = text
         let pillH = Self.tipPillH, arrowH = Self.tipArrowH
         let w = ((text as NSString).size(withAttributes: [.font: Self.tipFont]).width + 26).rounded(.up)
-        tipLabel.string = text
-        tipLabel.contentsScale = window?.backingScaleFactor ?? 2
-        tip.effectiveAppearance.performAsCurrentDrawingAppearance { tipLabel.foregroundColor = NSColor.labelColor.cgColor }   // 跟随浅色/深色外观
+        let scale = window?.backingScaleFactor ?? 2
+        let textKey = "\(tip.effectiveAppearance.name.rawValue)|\(Int(scale))|\(text)"   // 颜色跟随浅色/深色外观
+        if tipTextCache[textKey] == nil {
+            if tipTextCache.count > 200 { tipTextCache.removeAll() }
+            let size = NSSize(width: w, height: 17)
+            if let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(w * scale), pixelsHigh: Int(17 * scale), bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) {
+                rep.size = size
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+                tip.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    let attrs: [NSAttributedString.Key: Any] = [.font: Self.tipFont, .foregroundColor: NSColor.labelColor]
+                    let ts = (text as NSString).size(withAttributes: attrs)
+                    (text as NSString).draw(at: NSPoint(x: (w - ts.width) / 2, y: (17 - ts.height) / 2), withAttributes: attrs)
+                }
+                NSGraphicsContext.restoreGraphicsState()
+                tipTextCache[textKey] = rep.cgImage
+            }
+        }
+        tipLabel.contents = tipTextCache[textKey]
+        tipLabel.contentsScale = scale
         tipLabel.frame = CGRect(x: 0, y: arrowH + (pillH - 17) / 2, width: w, height: 17)
         tip.layer?.setAffineTransform(.identity)
         tip.frame = NSRect(origin: origin(w), size: NSSize(width: w, height: pillH + arrowH))
@@ -886,14 +905,20 @@ final class DockBarView: NSView {
         tip.isHidden = false
     }
 
-    override func mouseMoved(with event: NSEvent) {
-        if menuOpen { return }
-        let p = convert(event.locationInWindow, from: nil)
-        let inBand = p.y <= bottomMargin + barH + (mouseX != nil ? (L - S) + 10 : 4) && slide < 0.5
-        mouseX = inBand ? p.x : nil
-        startLink()
+    // 鼠标位置自己去读，不接收"鼠标移动"事件 —— 和系统程序坞的做法一样（它的主线程在悬停时几乎是闲的）。
+    // 走事件的话：每次移动都要经过 窗口服务器 → 事件线程 → 主线程分发 → 跟踪区域 才到这里，实测占了悬停时近三分之一的 CPU，
+    // 而且鼠标回报率越高越费（每秒 1000 次的鼠标：18%；系统程序坞：7.8%）。读位置本身不到 0.1 微秒，每帧读一次，和鼠标回报率无关。
+    var pointerOwned = false   // 由控制器的定时器更新：程序坞显示着、鼠标在条的范围内、而且鼠标正下方最上面的窗口是我们
+    func pollPointer() {
+        guard !menuOpen, dragState == nil, let w = window else { return }   // 菜单开着：保持放大不动；按住/拖动图标：由拖动事件处理
+        var newX: CGFloat? = nil
+        if pointerOwned {
+            let m = NSEvent.mouseLocation
+            let px = m.x - w.frame.minX, py = m.y - w.frame.minY   // 内容视图铺满窗口，窗口坐标就是视图坐标
+            if py >= 0 && py <= bottomMargin + barH + (mouseX != nil ? (L - S) + 10 : 4) && slide < 0.5 { newX = px }
+        }
+        if newX != mouseX { mouseX = newX; startLink() }
     }
-    override func mouseExited(with event: NSEvent) { if menuOpen { return }; mouseX = nil; startLink() }
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
@@ -1282,7 +1307,8 @@ final class DockBarView: NSView {
 }
 
 final class DockPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
+    var allowKey = true   // 玻璃窗口不允许成为键盘窗口（它不接收任何输入）
+    override var canBecomeKey: Bool { allowKey }
     // 私有 AppKit 方法：NSGlassEffectView 只在窗口有"激活外观"时才通透折射，否则降级成磨砂；程序坞从不成为 key window
     @objc func hasKeyAppearance() -> Bool { true }
     override var canBecomeMain: Bool { false }
@@ -1384,7 +1410,7 @@ final class CustomDockController {
         p.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) + 1)
         p.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]   // 全屏应用里也能推到底边唤出
         p.hidesOnDeactivate = false
-        p.acceptsMouseMovedEvents = true
+        p.acceptsMouseMovedEvents = false   // 鼠标位置靠 pollPointer 自己读
         let v = DockBarView(frame: .zero)
         // 我们自己的滑出速度跟随用户原来的设置（系统里现在那个值被我们故意改成了 1000，不能读它）
         if let m = ud.object(forKey: "origTimeModifier") as? Double, m > 0 { v.slideOmega = 14 / CGFloat(m) }
@@ -1394,7 +1420,7 @@ final class CustomDockController {
         gp.isReleasedWhenClosed = false
         gp.isOpaque = false; gp.backgroundColor = .clear; gp.hasShadow = false
         gp.level = p.level; gp.collectionBehavior = p.collectionBehavior
-        gp.hidesOnDeactivate = false; gp.ignoresMouseEvents = true
+        gp.hidesOnDeactivate = false; gp.ignoresMouseEvents = true; gp.allowKey = false
         gp.contentView = v.glassHost
         glassPanel = gp
         panel = p; bar = v
@@ -1481,6 +1507,8 @@ final class CustomDockController {
     private var lastTrashCheck = Date.distantPast
     private var lastBadgeCheck = Date.distantPast
     private var lastAppsCheck = Date.distantPast
+    private var lastTopCheck: CFTimeInterval = 0
+    private var topIsOurs = true
     private var edgeSince: Date?
 
     private func tick() {
@@ -1500,6 +1528,7 @@ final class CustomDockController {
             edgeSince = nil
             // 鼠标离底边还远（> 150pt）就查慢一点（20Hz），靠近了才用 60Hz：空闲时少被唤醒，唤出照样跟手
             if m.y - dock.frame.minY > 150 { timer?.fireDate = Date(timeIntervalSinceNow: 1.0 / 20) }
+            v.pointerOwned = false
             return
         }
         let now = Date()
@@ -1527,6 +1556,24 @@ final class CustomDockController {
         let overBar = local.x >= g.minX - 4 && local.x <= g.maxX + 4 && local.y >= 0 && local.y <= topY
         let ign = !(overBar && shown)
         if p.ignoresMouseEvents != ign { p.ignoresMouseEvents = ign }
+        // 鼠标归不归我们：除了在条的范围内，还要求鼠标正下方最上面的窗口是我们（别的应用的菜单/浮层盖在程序坞上时不放大）。
+        // 在应用里问一次窗口服务器实测要 0.5 毫秒左右，所以确认是我们之后 0.5 秒才复查一次；问不出结果时按"是我们"处理
+        var owned = !ign
+        if owned {
+            let t = CACurrentMediaTime()
+            if !topIsOurs || t - lastTopCheck > 0.5 {
+                lastTopCheck = t
+                let top = NSWindow.windowNumber(at: m, belowWindowWithWindowNumber: 0)
+                topIsOurs = top == 0 || top == p.windowNumber
+            }
+            owned = topIsOurs
+        }
+        v.pointerOwned = owned
+        v.pollPointer()   // 刷新定时器没开的时候，靠这里（60Hz）发现鼠标动了并把它叫起来
+        // 鼠标一进我们的窗口，AppKit 就会向系统登记"后台也要鼠标移动事件"，之后每次移动都投递过来（我们已经不用它了）。
+        // 这里把它压回去。右键菜单开着时不压（菜单要靠它跟随鼠标高亮）；应用是活动状态时（分组面板、设置窗口）走的是另一套，不受影响
+        // 设置之类的普通窗口开着时也不压（它们在后台时的悬停效果要靠这些事件）
+        if !v.menuOpen && !NSApp.isActive && !NSApp.windows.contains(where: { $0.isVisible && $0.styleMask.contains(.titled) }) { BackgroundMouseMoved.suppress() }
         if !autoHide { if !shown { show() }; return }
         if atEdge || (shown && overBar) { lastInside = Date() }
         if atEdge { if edgeSince == nil { edgeSince = Date() } } else { edgeSince = nil }
@@ -1557,7 +1604,7 @@ final class CustomDockController {
     }
 
     func show() { shown = true; bar?.slideTarget = 0; bar?.startLink() }
-    func hide() { shown = false; bar?.slideTarget = 1; bar?.mouseX = nil; bar?.startLink() }
+    func hide() { shown = false; bar?.pointerOwned = false; bar?.slideTarget = 1; bar?.mouseX = nil; bar?.startLink() }
 
     // MARK: 系统程序坞开关
     private func sh(_ cmd: String) {
@@ -1691,6 +1738,27 @@ enum AppWindows {
         app.unhide(); app.activate()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { send("com.apple.expose.front.awake" as CFString, 0) }
         return true
+    }
+}
+
+// 私有 SkyLight 接口：应用在后台时，窗口服务器还给它投递哪些事件。
+// 实测（最小程序，鼠标每秒上报 1000 次扫过窗口）：不压 → 收到 791 个移动事件、进程占 4.5% CPU；压住 → 2 个、0%。点击不受影响
+enum BackgroundMouseMoved {
+    private typealias ConnFn = @convention(c) () -> Int32
+    private typealias GetFn = @convention(c) (Int32, UnsafeMutablePointer<UInt32>) -> Int32
+    private typealias SetFn = @convention(c) (Int32, UInt32) -> Int32
+    private static let handle = UnsafeMutableRawPointer(bitPattern: -2)
+    private static let conn = dlsym(handle, "SLSMainConnectionID").map { unsafeBitCast($0, to: ConnFn.self) }
+    private static let get = dlsym(handle, "SLSGetBackgroundEventMask").map { unsafeBitCast($0, to: GetFn.self) }
+    private static let set = dlsym(handle, "SLSSetBackgroundEventMask").map { unsafeBitCast($0, to: SetFn.self) }
+    static var available: Bool { conn != nil && get != nil && set != nil }
+    private static let mouseMoved: UInt32 = 1 << 5
+    // 读一次不到 0.5 微秒（本地缓存），所以可以每个 tick 都看一眼；只有位被打开了才真的去改
+    static func suppress() {
+        guard let c = conn?(), let g = get, let s = set else { return }
+        var m: UInt32 = 0
+        guard g(c, &m) == 0, m & mouseMoved != 0 else { return }
+        _ = s(c, m & ~mouseMoved)
     }
 }
 

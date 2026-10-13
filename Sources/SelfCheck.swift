@@ -17,6 +17,8 @@ enum SelfCheck {
         add("badge.symbols", AppBadge.available, "_LSASNCreateWithPid / _LSCopyApplicationInformationItem")
         // 显示所有窗口：App Exposé 的私有通知函数
         add("expose.symbol", AppWindows.exposeAvailable, "CoreDockSendNotification")
+        // 后台不收鼠标移动事件（悬停时省一半 CPU）
+        add("pointer.bgmask", BackgroundMouseMoved.available, "SLSGetBackgroundEventMask / SLSSetBackgroundEventMask")
         // 窗口列表需要辅助功能授权
         add("accessibility", AppWindows.trusted, AppWindows.trusted ? "" : "未授权：右键菜单里不会列出窗口")
         // 系统程序坞是否已被压下去（延迟 1000 秒）

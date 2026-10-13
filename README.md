@@ -39,6 +39,7 @@ echo "Apple Development: you@example.com (XXXXXXXXXX)" > .signing-identity
 | 角标 | 私有 LaunchServices 接口读 `StatusLabel`（`AppBadge`） | 角标不显示 |
 | 废纸篓状态 / 打开 / 清倒 | 让访达代办（AppleScript，首次需授权"自动化"） | 图标一直为空、点击无反应 |
 | 隐藏系统程序坞 | `autohide-delay 1000`（普通桌面）+ `autohide-time-modifier 1000`（全屏应用里推底边时它会无视延迟弹出，只能让滑出动画慢到看不见）+ `killall Dock` | 两个程序坞同时出现 |
+| 悬停时的 CPU 占用 | 鼠标位置自己读、不收移动事件；私有 SkyLight 接口 `SLSSetBackgroundEventMask` 压住 AppKit 自动打开的后台鼠标移动事件（`BackgroundMouseMoved`） | 功能不受影响，只是悬停时 CPU 高一倍，且随鼠标回报率上涨 |
 
 ## 系统升级后怎么检查
 
