@@ -71,14 +71,33 @@ final class CustomDockModel: ObservableObject {
         appsObs = NSWorkspace.shared.observe(\.runningApplications) { [weak self] _, _ in DispatchQueue.main.async { self?.rebuildIfAppsChanged() } }
     }
     // 该显示的应用集合没变就什么都不做（后台进程来来去去很频繁）
+    // 当前在运行的普通应用（会显示在程序坞里的那种）。逐个问系统"它是不是普通应用"很慢（一轮约 30ms），只能在后台线程调用
+    static func regularApps() -> [(pid_t, String)] {
+        NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+            .compactMap { r in r.bundleURL.map { (r.processIdentifier, norm($0.path)) } }
+    }
+    private var appsChecking = false
     func rebuildIfAppsChanged() {
-        let now = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.compactMap { $0.bundleURL.map { Self.norm($0.path) } })
-        if now != running { rebuild() }
+        if appsChecking { return }
+        appsChecking = true
+        DispatchQueue.global(qos: .utility).async {
+            let now = Set(Self.regularApps().map { $0.1 })
+            DispatchQueue.main.async {
+                self.appsChecking = false
+                if now != self.running { self.rebuild() }
+            }
+        }
     }
 
+    // 规范化路径要查磁盘，而它每秒被调用几十次（角标、运行状态、应用列表核对），所以结果记下来
+    private static var normCache: [String: String] = [:]
+    private static let normLock = NSLock()
     static func norm(_ p: String) -> String {
+        normLock.lock(); defer { normLock.unlock() }
+        if let c = normCache[p] { return c }
         var s = URL(fileURLWithPath: p).standardizedFileURL.path
         if s.hasSuffix("/") { s.removeLast() }
+        normCache[p] = s
         return s
     }
 
@@ -138,11 +157,9 @@ final class CustomDockModel: ObservableObject {
     func refreshBadges(_ changed: @escaping () -> Void) {
         if badgeAsking { return }
         badgeAsking = true
-        let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
-            .compactMap { r in r.bundleURL.map { (r.processIdentifier, Self.norm($0.path)) } }
-        DispatchQueue.global(qos: .utility).async {   // 一轮约 7ms，不能放主线程（120Hz 一帧才 8ms）
+        DispatchQueue.global(qos: .utility).async {   // 列出运行中的应用 + 逐个查角标要 25ms 以上，放主线程会掉好几帧
             var b: [String: String] = [:]
-            for (pid, path) in apps { if let l = AppBadge.label(pid: pid) { b[path] = l } }
+            for (pid, path) in Self.regularApps() { if let l = AppBadge.label(pid: pid) { b[path] = l } }
             DispatchQueue.main.async {
                 self.badgeAsking = false
                 if b != self.badges { self.badges = b; changed() }
@@ -237,7 +254,9 @@ final class DockBarView: NSView {
     let overlay = NSView()          // 浮层：提示
     // 名称提示：毛玻璃胶囊 + 朝下的小箭头（整体一个形状，用遮罩图裁出来）
     private let tip = NSVisualEffectView()
-    private let tipLabel = NSTextField(labelWithString: "")
+    // 文字用图层而不是文本控件：提示每帧都跟着图标移动，文本控件会每帧重画文字（实测占了悬停时一半的 CPU），图层只在换字时画一次
+    private let tipLabel = CATextLayer()
+    static let tipFont = NSFont.systemFont(ofSize: 13, weight: .medium)
     private let tipOutline = CAShapeLayer()
     static let tipPillH: CGFloat = 26, tipArrowH: CGFloat = 6
     private let barShadow = CALayer()
@@ -276,10 +295,10 @@ final class DockBarView: NSView {
         addSubview(overlay)
         tip.material = .menu; tip.blendingMode = .behindWindow; tip.state = .active
         tip.isHidden = true
-        tipLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        tipLabel.textColor = .labelColor; tipLabel.alignment = .center
-        tip.addSubview(tipLabel)
         tip.wantsLayer = true
+        tipLabel.font = Self.tipFont; tipLabel.fontSize = 13; tipLabel.alignmentMode = .center
+        tipLabel.actions = ["contents": NSNull(), "position": NSNull(), "bounds": NSNull()]
+        tip.layer?.addSublayer(tipLabel)
         tipOutline.fillColor = nil; tipOutline.lineWidth = 0.5
         tipOutline.strokeColor = NSColor(white: 0.5, alpha: 0.45).cgColor   // 中性灰：浅色、深色背景上都看得见
         tip.layer?.addSublayer(tipOutline)
@@ -361,7 +380,13 @@ final class DockBarView: NSView {
         return true
     }
 
+    // 名称提示每帧都要用到名字，而取应用显示名要查磁盘：记下来，图标列表刷新时清空
+    private var labelCache: [String: String] = [:]
     func label(for e: DockEntry) -> String {
+        if let c = labelCache[e.id] { return c }
+        let l = computeLabel(for: e); labelCache[e.id] = l; return l
+    }
+    private func computeLabel(for e: DockEntry) -> String {
         switch e {
         case .app(let p, _):
             var n = FileManager.default.displayName(atPath: p); if n.hasSuffix(".app") { n.removeLast(4) }; return n
@@ -372,6 +397,7 @@ final class DockBarView: NSView {
     }
 
     func reloadIcons() {
+        labelCache.removeAll()
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         let px = L * scale
         var alive = Set<String>()
@@ -734,9 +760,11 @@ final class DockBarView: NSView {
         if text == lastTip && !tip.isHidden { tip.setFrameOrigin(origin(tip.frame.width)); return }
         lastTip = text
         let pillH = Self.tipPillH, arrowH = Self.tipArrowH
-        let w = ((text as NSString).size(withAttributes: [.font: tipLabel.font!]).width + 26).rounded(.up)
-        tipLabel.stringValue = text
-        tipLabel.frame = NSRect(x: 0, y: arrowH + (pillH - 17) / 2, width: w, height: 17)
+        let w = ((text as NSString).size(withAttributes: [.font: Self.tipFont]).width + 26).rounded(.up)
+        tipLabel.string = text
+        tipLabel.contentsScale = window?.backingScaleFactor ?? 2
+        tip.effectiveAppearance.performAsCurrentDrawingAppearance { tipLabel.foregroundColor = NSColor.labelColor.cgColor }   // 跟随浅色/深色外观
+        tipLabel.frame = CGRect(x: 0, y: arrowH + (pillH - 17) / 2, width: w, height: 17)
         tip.frame = NSRect(origin: origin(w), size: NSSize(width: w, height: pillH + arrowH))
         // 胶囊 + 箭头是同一条轮廓：既当遮罩，也描一圈很淡的边（浅色背景上胶囊和背景同色，没有边就看不出来）
         let shape = CGMutablePath(); let cx = w / 2, by = arrowH
