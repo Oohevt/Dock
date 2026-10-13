@@ -837,6 +837,9 @@ final class DockBarView: NSView {
     }
 
     private var lastTip = ""
+    // 立刻收起名称提示（不等下一帧）
+    func hideTip() { tip.isHidden = true; lastTip = ""; tip.layer?.setAffineTransform(.identity) }
+    var tipVisible: Bool { !tip.isHidden }
     func updateTooltip() {
         if mouseX == nil { tipSuppressed = nil }
         guard !menuOpen, dragState?.active != true, slide < 0.01, let mx = mouseX, let i = index(at: NSPoint(x: mx, y: bottomMargin + barH / 2)), let il = iconLayers[entryIDs[i]] else {
@@ -1510,6 +1513,12 @@ final class CustomDockController {
         }
         let dock = dockInfo
         let atEdge = edgeDisplay(m) == dock.id
+        // 兜底：程序坞已经收起（或正在收起）时，名称提示绝不该还在。出现过一次"程序坞没了、提示还留在屏幕底边"，原因没查明，
+        // 所以这里强制收掉并记一笔，下次能从日志里看到当时的状态
+        if !shown && v.tipVisible {
+            dgLog("stray tooltip while hidden: slide=\(v.slide) target=\(v.slideTarget) mouseX=\(String(describing: v.mouseX)) owned=\(v.pointerOwned) menu=\(v.menuOpen) drag=\(v.dragState != nil)")
+            v.mouseX = nil; v.hideTip()
+        }
         // 已收起且鼠标不在底边：直接返回
         if !shown && !atEdge && p.ignoresMouseEvents && autoHide {
             edgeSince = nil
@@ -1591,7 +1600,7 @@ final class CustomDockController {
     }
 
     func show() { shown = true; bar?.slideTarget = 0; bar?.startLink() }
-    func hide() { shown = false; bar?.pointerOwned = false; bar?.slideTarget = 1; bar?.mouseX = nil; bar?.startLink() }
+    func hide() { shown = false; bar?.pointerOwned = false; bar?.slideTarget = 1; bar?.mouseX = nil; bar?.hideTip(); bar?.startLink() }
 
     // MARK: 系统程序坞开关
     private func sh(_ cmd: String) {
