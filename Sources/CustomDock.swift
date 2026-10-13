@@ -201,6 +201,7 @@ final class DockBarView: NSView {
     private var dotLayers: [String: CALayer] = [:]
     private var sepLayers: [String: CALayer] = [:]
     private var badgeLayers: [String: CALayer] = [:]
+    private var blankRetries: [String: Int] = [:]
     private var runningIDs = Set<String>()
     private var badgeText: [String: String] = [:]
     private var badgeAspect: [String: CGFloat] = [:]
@@ -310,7 +311,18 @@ final class DockBarView: NSView {
         NSGraphicsContext.current = ctx
         img.draw(in: NSRect(x: 0, y: 0, width: px, height: px), from: .zero, operation: .copy, fraction: 1, respectFlipped: true, hints: [.interpolation: NSNumber(value: NSImageInterpolation.high.rawValue)])
         NSGraphicsContext.restoreGraphicsState()
+        if isBlank(rep) { return nil }
         return rep.cgImage
+    }
+
+    // 整张图都是透明的 = 没画出东西。新装的应用第一次打开时，系统还没备好它的图标，这一刻要到的就是这样一张空图
+    static func isBlank(_ rep: NSBitmapImageRep) -> Bool {
+        guard let d = rep.bitmapData, rep.samplesPerPixel == 4 else { return false }
+        let w = rep.pixelsWide, h = rep.pixelsHigh, row = rep.bytesPerRow
+        for gy in 1..<16 { for gx in 1..<16 {
+            if d[(h * gy / 16) * row + (w * gx / 16) * 4 + 3] > 8 { return false }
+        } }
+        return true
     }
 
     func label(for e: DockEntry) -> String {
@@ -347,8 +359,19 @@ final class DockBarView: NSView {
             if case .app(let p, _) = e, let d = (try? FileManager.default.attributesOfItem(atPath: p))?[.modificationDate] as? Date { key += "@\(d.timeIntervalSince1970)" }
             if contentKeys[e.id] != key {
                 if case .app(let p, _) = e { AppIconCache.cache[p] = nil }
-                il.contents = Self.render(image(for: e), px: Int(px.rounded(.up)))
-                contentKeys[e.id] = key
+                if let cg = Self.render(image(for: e), px: Int(px.rounded(.up))) {
+                    il.contents = cg
+                    contentKeys[e.id] = key
+                    blankRetries[e.id] = nil
+                } else {
+                    // 空图不保存（否则会一直显示空白）；过一会儿再要，间隔逐次加倍：0.5、1、2、4、8、16 秒
+                    let n = blankRetries[e.id] ?? 0
+                    if n < 6 {
+                        blankRetries[e.id] = n + 1
+                        dgLog("icon for \(e.id) came back blank, retry #\(n + 1)")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5 * pow(2, Double(n))) { [weak self] in self?.reloadIcons() }
+                    }
+                }
             }
             il.contentsScale = scale
             il.minificationFilter = .linear; il.magnificationFilter = .linear
