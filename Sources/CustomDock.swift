@@ -1139,9 +1139,8 @@ final class CustomDockController {
         p.hidesOnDeactivate = false
         p.acceptsMouseMovedEvents = true
         let v = DockBarView(frame: .zero)
-        if let m = CFPreferencesCopyAppValue("autohide-time-modifier" as CFString, "com.apple.dock" as CFString) as? NSNumber, m.doubleValue > 0 {
-            v.slideOmega = 14 / CGFloat(m.doubleValue)
-        }
+        // 我们自己的滑出速度跟随用户原来的设置（系统里现在那个值被我们故意改成了 1000，不能读它）
+        if let m = ud.object(forKey: "origTimeModifier") as? Double, m > 0 { v.slideOmega = 14 / CGFloat(m) }
         p.contentView = v
         panel = p; bar = v
         v.onWidthChange = { [weak self] _ in self?.frameWindow() }
@@ -1219,26 +1218,9 @@ final class CustomDockController {
         }
     }
 
-    private var lastExposeCheck = Date.distantPast
     private var lastTrashCheck = Date.distantPast
     private var lastBadgeCheck = Date.distantPast
     private var edgeSince: Date?
-    private var inExpose = false
-    private var dockPid: pid_t = 0
-    // 调度中心/App Exposé/启动台：系统程序坞会创建全屏覆盖窗口
-    private func exposeActive(_ screen: NSScreen) -> Bool {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return false }
-        let sw = screen.frame.width, sh = screen.frame.height
-        if dockPid == 0 || NSRunningApplication(processIdentifier: dockPid) == nil {
-            dockPid = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier ?? 0
-        }
-        let dockPid = self.dockPid
-        return list.contains { w in
-            guard (w[kCGWindowOwnerPID as String] as? pid_t) == dockPid,
-                  let b = w[kCGWindowBounds as String] as? [String: CGFloat] else { return false }
-            return (b["Width"] ?? 0) >= sw * 0.9 && (b["Height"] ?? 0) >= sh * 0.9 && (w[kCGWindowLayer as String] as? Int ?? 0) > 0
-        }
-    }
 
     private func tick() {
         guard let p = panel, let v = bar else { return }
@@ -1253,8 +1235,7 @@ final class CustomDockController {
         let dock = dockInfo
         let atEdge = edgeDisplay(m) == dock.id
         // 已收起且鼠标不在底边：直接返回
-        if !shown && !atEdge && !inExpose && p.ignoresMouseEvents && autoHide { edgeSince = nil; return }
-        // 查窗口列表一次约 1ms：只在可见或即将唤出时查，最多 0.3s 一次
+        if !shown && !atEdge && p.ignoresMouseEvents && autoHide { edgeSince = nil; return }
         let now = Date()
         // 废纸篓状态只在程序坞看得见时才查，最多 10s 一次
         if shown && now.timeIntervalSince(lastTrashCheck) > 10 {
@@ -1266,17 +1247,9 @@ final class CustomDockController {
             lastBadgeCheck = now
             CustomDockModel.shared.refreshBadges { [weak self] in self?.bar?.reloadBadges() }
         }
-        if now.timeIntervalSince(lastExposeCheck) > 0.3 {
-            lastExposeCheck = now
-            let e = exposeActive(dock.screen)
-            if e != inExpose {
-                inExpose = e
-                dgLog("expose \(e)")
-                NSAnimationContext.runAnimationGroup { c in c.duration = 0.15; p.animator().alphaValue = e ? 0 : 1 }
-                p.ignoresMouseEvents = e
-            }
-        }
-        if inExpose { return }
+        // 这里以前会在"系统程序坞有全屏窗口"时让位（当成调度中心）。删掉了：
+        // 全屏应用里把鼠标推到底边，系统程序坞自己也会弹出并带着同样的窗口，两者分不出来，结果是我们的程序坞被顶掉、有时很久不回来。
+        // 现在调度中心里推到底边也能唤出我们的程序坞，和系统程序坞在调度中心里的表现一致。
         // 只让程序坞条本身拦截鼠标，透明区域放行
         let local = NSPoint(x: m.x - p.frame.minX, y: m.y - p.frame.minY)
         // 与原生一致：只看程序坞条实际范围（含放大后的图标高度），外扩 4pt
@@ -1327,17 +1300,26 @@ final class CustomDockController {
     private var restoreCmd: String {
         let delay = ud.object(forKey: "origAutohideDelay") as? Double ?? 0
         let ah = ud.object(forKey: "origAutohide") as? Bool ?? true
-        return "defaults write com.apple.dock autohide -bool \(ah ? "true" : "false"); defaults write com.apple.dock autohide-delay -float \(delay); killall Dock"
+        let tm = ud.object(forKey: "origTimeModifier") as? Double ?? 0
+        let tmCmd = tm > 0 ? "defaults write com.apple.dock autohide-time-modifier -float \(tm)" : "defaults delete com.apple.dock autohide-time-modifier"
+        return "defaults write com.apple.dock autohide -bool \(ah ? "true" : "false"); defaults write com.apple.dock autohide-delay -float \(delay); \(tmCmd); killall Dock"
     }
-    // 接管：把系统程序坞的唤出延迟调到 1000 秒（等于藏起来）；已经是了就不动它
+    // 接管系统程序坞，两个设置都要改（已经是了就不动它）：
+    //  - autohide-delay = 1000：鼠标停在底边 1000 秒才唤出，普通桌面上等于藏起来
+    //  - autohide-time-modifier = 1000：滑出动画拉长到 1000 秒。全屏应用里把鼠标推到底边时系统程序坞会无视上面的延迟直接弹出，
+    //    这个关不掉，只能让它滑得慢到看不见
     private func suppressSystemDock() {
         CFPreferencesAppSynchronize("com.apple.dock" as CFString)
+        let delay = (readDock("autohide-delay") as? NSNumber)?.doubleValue
+        let tm = (readDock("autohide-time-modifier") as? NSNumber)?.doubleValue
         if ud.object(forKey: "origAutohideDelay") == nil {
-            ud.set((readDock("autohide-delay") as? NSNumber)?.doubleValue ?? 0, forKey: "origAutohideDelay")
+            ud.set(delay ?? 0, forKey: "origAutohideDelay")
             ud.set((readDock("autohide") as? NSNumber)?.boolValue ?? false, forKey: "origAutohide")
         }
-        if (readDock("autohide-delay") as? NSNumber)?.doubleValue != 1000 {
-            sh("defaults write com.apple.dock autohide -bool true; defaults write com.apple.dock autohide-delay -float 1000; killall Dock")
+        // 0 表示"用户没设过"；读到 1000 说明是我们上次留下的，不能当成用户的原值
+        if ud.object(forKey: "origTimeModifier") == nil { ud.set((tm == nil || tm == 1000) ? 0 : tm!, forKey: "origTimeModifier") }
+        if delay != 1000 || tm != 1000 {
+            sh("defaults write com.apple.dock autohide -bool true; defaults write com.apple.dock autohide-delay -float 1000; defaults write com.apple.dock autohide-time-modifier -float 1000; killall Dock")
         }
         dgRestoreDockOnCrash(restoreCmd)
     }
@@ -1352,7 +1334,7 @@ final class CustomDockController {
     }
     func disable() {
         restoreSystemDock()
-        ud.removeObject(forKey: "origAutohideDelay"); ud.removeObject(forKey: "origAutohide")
+        ud.removeObject(forKey: "origAutohideDelay"); ud.removeObject(forKey: "origAutohide"); ud.removeObject(forKey: "origTimeModifier")
         ud.set(false, forKey: "customDockEnabled")
         stop()
         GroupManager.shared.rebuildLaunchers()   // 回到系统程序坞：分组靠启动器小应用放进去

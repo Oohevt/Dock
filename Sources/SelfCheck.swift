@@ -23,7 +23,8 @@ enum SelfCheck {
         if CustomDockController.shared.enabled {
             CFPreferencesAppSynchronize("com.apple.dock" as CFString)
             let d = (CFPreferencesCopyAppValue("autohide-delay" as CFString, "com.apple.dock" as CFString) as? NSNumber)?.doubleValue
-            add("systemdock.suppressed", d == 1000, "autohide-delay=\(d.map { String($0) } ?? "nil")")
+            let t = (CFPreferencesCopyAppValue("autohide-time-modifier" as CFString, "com.apple.dock" as CFString) as? NSNumber)?.doubleValue
+            add("systemdock.suppressed", d == 1000 && t == 1000, "autohide-delay=\(d.map { String($0) } ?? "nil") time-modifier=\(t.map { String($0) } ?? "nil")")
         }
         add("screens", !NSScreen.screens.isEmpty, "\(NSScreen.screens.count)")
 

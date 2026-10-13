@@ -7,7 +7,7 @@
 - 液态玻璃程序坞条：放大、自动隐藏、拖动排序、名称提示、运行指示点、启动弹跳
 - 分组：点开是同款玻璃面板，组内可拖动排序；分组图标显示组内未读数之和
 - 角标（未读数）、废纸篓空/满图标、废纸篓右键"清倒"
-- 调度中心 / 截图遮罩等全屏覆盖层出现时自动让位
+- 截图遮罩等全屏覆盖层会盖住它；调度中心里推到底边也能唤出（和系统程序坞一致）
 
 ## 构建与安装
 
@@ -38,8 +38,7 @@ echo "Apple Development: you@example.com (XXXXXXXXXX)" > .signing-identity
 | 玻璃通透折射 | 私有方法 `hasKeyAppearance`（`DockPanel`、`GroupPopupWindow`） | 玻璃变回磨砂 |
 | 角标 | 私有 LaunchServices 接口读 `StatusLabel`（`AppBadge`） | 角标不显示 |
 | 废纸篓状态 / 打开 / 清倒 | 让访达代办（AppleScript，首次需授权"自动化"） | 图标一直为空、点击无反应 |
-| 调度中心让位 | 识别系统程序坞进程的全屏窗口（`exposeActive`） | 调度中心里程序坞不隐藏 |
-| 隐藏系统程序坞 | `defaults write com.apple.dock autohide-delay 1000` + `killall Dock` | 两个程序坞同时出现 |
+| 隐藏系统程序坞 | `autohide-delay 1000`（普通桌面）+ `autohide-time-modifier 1000`（全屏应用里推底边时它会无视延迟弹出，只能让滑出动画慢到看不见）+ `killall Dock` | 两个程序坞同时出现 |
 
 ## 系统升级后怎么检查
 
