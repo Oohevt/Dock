@@ -238,8 +238,10 @@ final class DockBarView: NSView {
     // 名称提示：毛玻璃胶囊 + 朝下的小箭头（整体一个形状，用遮罩图裁出来）
     private let tip = NSVisualEffectView()
     private let tipLabel = NSTextField(labelWithString: "")
+    private let tipOutline = CAShapeLayer()
     static let tipPillH: CGFloat = 26, tipArrowH: CGFloat = 6
-    private let barShadow = CALayer(), barShadowMask = CAShapeLayer()
+    private let barShadow = CALayer()
+    static let shadowPad: CGFloat = 30   // 阴影图比程序坞条四周各多出的宽度
     var mouseX: CGFloat? = nil
     private var tracking: NSTrackingArea?
     private var pressedIndex: Int? = nil
@@ -277,12 +279,26 @@ final class DockBarView: NSView {
         tipLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         tipLabel.textColor = .labelColor; tipLabel.alignment = .center
         tip.addSubview(tipLabel)
+        tip.wantsLayer = true
+        tipOutline.fillColor = nil; tipOutline.lineWidth = 0.5
+        tipOutline.strokeColor = NSColor(white: 0.5, alpha: 0.45).cgColor   // 中性灰：浅色、深色背景上都看得见
+        tip.layer?.addSublayer(tipOutline)
         overlay.addSubview(tip)
         // 程序坞条外圈的淡阴影：只画在条的外面（中间挖空，不然会透过玻璃把条本身压暗）
-        barShadow.shadowColor = NSColor.black.cgColor; barShadow.shadowOpacity = 0.26
-        barShadow.shadowRadius = 12; barShadow.shadowOffset = CGSize(width: 0, height: -3)
-        barShadowMask.fillRule = .evenOdd
-        barShadow.mask = barShadowMask
+        // 阴影预先画成一张图，中间部分拉伸（九宫格）：悬停放大时条的宽度每帧都变，实时阴影要每帧重算，实测让 CPU 从 ~14% 涨到 23%
+        let r = NativeDock.cornerRadius, pad = Self.shadowPad, side = (r + pad) * 2 + 2
+        let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            let bar = CGRect(x: pad, y: pad, width: side - pad * 2, height: side - pad * 2)
+            let shape = CGPath(roundedRect: bar, cornerWidth: r, cornerHeight: r, transform: nil)
+            ctx.addRect(CGRect(x: 0, y: 0, width: side, height: side)); ctx.addPath(shape); ctx.clip(using: .evenOdd)   // 只留条外面的部分
+            ctx.setShadow(offset: CGSize(width: 0, height: -3), blur: 12, color: NSColor(white: 0, alpha: 0.26).cgColor)
+            ctx.addPath(shape); ctx.setFillColor(NSColor.black.cgColor); ctx.fillPath()
+            return true
+        }
+        barShadow.contents = img
+        barShadow.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        barShadow.contentsCenter = CGRect(x: 0.5 - 0.5 / side, y: 0.5 - 0.5 / side, width: 1 / side, height: 1 / side)
         layer?.insertSublayer(barShadow, at: 0)
         readSystemPrefs()
         setupDrop()
@@ -649,11 +665,7 @@ final class DockBarView: NSView {
             let gf = NSRect(x: ((minX - barPadX) * 2).rounded() / 2, y: (barY * 2).rounded() / 2, width: ((maxX - minX + barPadX * 2) * 2).rounded() / 2, height: barH)
             if abs(gf.minX - lastGlass.minX) > 0.25 || abs(gf.width - lastGlass.width) > 0.25 || abs(gf.minY - lastGlass.minY) > 0.25 {
                 glass.frame = gf; lastGlass = gf
-                let r = NativeDock.cornerRadius
-                barShadow.frame = bounds
-                barShadow.shadowPath = CGPath(roundedRect: gf, cornerWidth: r, cornerHeight: r, transform: nil)
-                let hole = CGMutablePath(); hole.addRect(gf.insetBy(dx: -60, dy: -60)); hole.addRoundedRect(in: gf, cornerWidth: r, cornerHeight: r)
-                barShadowMask.frame = bounds; barShadowMask.path = hole
+                barShadow.frame = gf.insetBy(dx: -Self.shadowPad, dy: -Self.shadowPad)
             }
         }
         for e in list {
@@ -726,16 +738,30 @@ final class DockBarView: NSView {
         tipLabel.stringValue = text
         tipLabel.frame = NSRect(x: 0, y: arrowH + (pillH - 17) / 2, width: w, height: 17)
         tip.frame = NSRect(origin: origin(w), size: NSSize(width: w, height: pillH + arrowH))
+        // 胶囊 + 箭头是同一条轮廓：既当遮罩，也描一圈很淡的边（浅色背景上胶囊和背景同色，没有边就看不出来）
+        let shape = CGMutablePath(); let cx = w / 2, by = arrowH
+        shape.addRoundedRect(in: CGRect(x: 0.25, y: by, width: w - 0.5, height: pillH - 0.25), cornerWidth: pillH / 2 - 0.25, cornerHeight: pillH / 2 - 0.25)
+        let arrow = CGMutablePath()
+        arrow.move(to: CGPoint(x: cx - 8, y: by + 0.5))
+        arrow.addCurve(to: CGPoint(x: cx, y: 0.25), control1: CGPoint(x: cx - 4, y: by + 0.5), control2: CGPoint(x: cx - 2.5, y: 0.25))
+        arrow.addCurve(to: CGPoint(x: cx + 8, y: by + 0.5), control1: CGPoint(x: cx + 2.5, y: 0.25), control2: CGPoint(x: cx + 4, y: by + 0.5))
+        arrow.closeSubpath()
         tip.maskImage = NSImage(size: tip.frame.size, flipped: false) { _ in
-            NSColor.black.setFill()
-            NSBezierPath(roundedRect: NSRect(x: 0, y: arrowH, width: w, height: pillH), xRadius: pillH / 2, yRadius: pillH / 2).fill()
-            let a = NSBezierPath(); let cx = w / 2
-            a.move(to: NSPoint(x: cx - 8, y: arrowH + 0.5))
-            a.curve(to: NSPoint(x: cx, y: 0), controlPoint1: NSPoint(x: cx - 4, y: arrowH + 0.5), controlPoint2: NSPoint(x: cx - 2.5, y: 0))
-            a.curve(to: NSPoint(x: cx + 8, y: arrowH + 0.5), controlPoint1: NSPoint(x: cx + 2.5, y: 0), controlPoint2: NSPoint(x: cx + 4, y: arrowH + 0.5))
-            a.close(); a.fill()
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.setFillColor(NSColor.black.cgColor); ctx.addPath(shape); ctx.fillPath(); ctx.addPath(arrow); ctx.fillPath()
             return true
         }
+        // 外轮廓 = 胶囊上半圈 + 两侧 + 箭头两条边（胶囊底边在箭头处断开）
+        let outline = CGMutablePath(); let rr = pillH / 2 - 0.25, top = by + pillH - 0.25
+        outline.move(to: CGPoint(x: cx + 8, y: by + 0.25))
+        outline.addLine(to: CGPoint(x: w - 0.25 - rr, y: by + 0.25))
+        outline.addArc(center: CGPoint(x: w - 0.25 - rr, y: by + rr + 0.25), radius: rr, startAngle: -.pi / 2, endAngle: .pi / 2, clockwise: false)
+        outline.addLine(to: CGPoint(x: 0.25 + rr, y: top + 0.25))
+        outline.addArc(center: CGPoint(x: 0.25 + rr, y: by + rr + 0.25), radius: rr, startAngle: .pi / 2, endAngle: -.pi / 2, clockwise: false)
+        outline.addLine(to: CGPoint(x: cx - 8, y: by + 0.25))
+        outline.addCurve(to: CGPoint(x: cx, y: 0.25), control1: CGPoint(x: cx - 4, y: by + 0.25), control2: CGPoint(x: cx - 2.5, y: 0.25))
+        outline.addCurve(to: CGPoint(x: cx + 8, y: by + 0.25), control1: CGPoint(x: cx + 2.5, y: 0.25), control2: CGPoint(x: cx + 4, y: by + 0.25))
+        tipOutline.frame = tip.bounds; tipOutline.path = outline
         tip.isHidden = false
     }
 
