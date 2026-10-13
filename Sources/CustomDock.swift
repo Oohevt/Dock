@@ -528,6 +528,8 @@ final class DockBarView: NSView {
     var orderedEntries: [DockEntry] {
         var list = model.entries
         if let d = dragState, d.active, let from = list.firstIndex(where: { $0.id == d.id }) {
+            // 没固定的应用：只有拖进固定区才让别的图标让位；压在分组上、拖出程序坞、还在右边时，它原来的位置原样留着
+            if isUnpinned(d.id) && (dropTarget != nil || outsideBar(d.y) || !inPinnedZone(d.x)) { return list }
             let e = list.remove(at: from)
             if outsideBar(d.y) { return list }   // 拖出程序坞：其他图标合拢
             // 压在分组上时冻结排序，否则分组图标会在光标两侧来回让位
@@ -538,6 +540,12 @@ final class DockBarView: NSView {
         }
         return list
     }
+
+    func isUnpinned(_ id: String) -> Bool {
+        model.entries.contains { e in if case .app(_, false) = e { return e.id == id }; return false }
+    }
+    // 固定区 = 第一条分隔线的左边
+    func inPinnedZone(_ x: CGFloat) -> Bool { dispX["div1"].map { x < $0 } ?? true }
 
     func outsideBar(_ y: CGFloat) -> Bool { y > bottomMargin + barH + 50 }
 
@@ -739,7 +747,7 @@ final class DockBarView: NSView {
         if let i = pressedIndex {
             let e = model.entries[i]
             var draggable = false
-            if case .app(_, let pinned) = e, pinned, i > 0 { draggable = true }
+            if case .app = e, i > 0 { draggable = true }   // 包括分隔线右边"在运行但没固定"的应用；访达（第 0 个）不能动
             if case .group = e { draggable = true }
             if draggable { dragState = DragState(id: e.id, index: i, x: p.x, y: p.y, startX: p.x, startY: p.y, active: false) }
         }
@@ -752,7 +760,7 @@ final class DockBarView: NSView {
         if !d.active && hypot(p.x - d.startX, p.y - d.startY) > 6 { d.active = true; reordering = true; mouseX = nil; tipBg.opacity = 0 }
         dragState = d
         dropTarget = (d.active && d.id.hasPrefix("app:") && !outsideBar(p.y)) ? centerHit(p.x, Self.isGroup) : nil
-        if d.active { NSCursor.current.set(); if outsideBar(p.y) && d.id.hasPrefix("app:") { NSCursor.disappearingItem.set() } else { NSCursor.arrow.set() } }
+        if d.active { NSCursor.current.set(); if outsideBar(p.y) && d.id.hasPrefix("app:") && !isUnpinned(d.id) { NSCursor.disappearingItem.set() } else { NSCursor.arrow.set() } }
         startLink()
     }
 
@@ -777,6 +785,15 @@ final class DockBarView: NSView {
                     // 拖到分组上：放进分组（会从程序坞条上消失，出现在分组里）
                     dropTarget = nil; dragState = nil
                     GroupManager.shared.addApp(info, to: g)
+                    startLink(); return
+                }
+                if isUnpinned(d.id) {
+                    // 在运行但没固定的应用：拖进固定区 = 固定在那个位置；否则弹回原位
+                    let pinHere = !outsideBar(d.y) && inPinnedZone(d.x)
+                    if pinHere { _ = orderedEntries }   // 刷新 lastInsert
+                    dispX[d.id] = d.x; velX[d.id] = 0; reordering = true
+                    dragState = nil
+                    if pinHere { pin([path], atEntryIndex: lastInsert) }
                     startLink(); return
                 }
                 if outsideBar(d.y) {
