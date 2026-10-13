@@ -403,7 +403,7 @@ final class DockBarView: NSView {
             // 废纸篓空/满、应用更新后换图标：都算进缓存键，变了才重新渲染
             if case .trash = e { key += CustomDockModel.trashFull ? "F" : "E" }
             if case .app(let p, _) = e, let d = (try? FileManager.default.attributesOfItem(atPath: p))?[.modificationDate] as? Date { key += "@\(d.timeIntervalSince1970)" }
-            if contentKeys[e.id] != key {
+            if contentKeys[e.id] != key || il.contents == nil {   // 图层是空的就一定要画，不管记录怎么说
                 if case .app(let p, _) = e { AppIconCache.cache[p] = nil }
                 let cg = Self.render(image(for: e), px: Int(px.rounded(.up)))
                 if let cg = cg { il.contents = cg }
@@ -436,7 +436,9 @@ final class DockBarView: NSView {
                 iconHost.layer?.addSublayer(d); dotLayers[e.id] = d
             }
         }
-        for (k, l) in iconLayers where !alive.contains(k) { l.removeFromSuperlayer(); iconLayers[k] = nil }
+        // 图层删掉时，"这个图标已经画过"的记录也要一起删。否则同一个应用退出后再打开，会拿到一个新的空图层，
+        // 却因为记录还在而跳过绘制 —— 位置和小圆点都在，图标是空的
+        for (k, l) in iconLayers where !alive.contains(k) { l.removeFromSuperlayer(); iconLayers[k] = nil; contentKeys[k] = nil; blankRetries[k] = nil }
         for (k, l) in dotLayers where !alive.contains(k) { l.removeFromSuperlayer(); dotLayers[k] = nil }
         for (k, l) in sepLayers where !alive.contains(k) { l.removeFromSuperlayer(); sepLayers[k] = nil }
         // 哪些条目要亮运行指示点：在这里算好。以前每帧都算，分组里每个应用都要规范化一次路径（一次磁盘查询），放大时占了三成多 CPU
