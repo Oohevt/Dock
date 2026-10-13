@@ -76,6 +76,7 @@ final class CustomDockModel: ObservableObject {
         NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
             .compactMap { r in r.bundleURL.map { (r.processIdentifier, norm($0.path)) } }
     }
+    private var regularPids: [(pid_t, String)] = []
     private var appsChecking = false
     func rebuildIfAppsChanged() {
         if appsChecking { return }
@@ -124,6 +125,7 @@ final class CustomDockModel: ObservableObject {
         let grouped = groupedPaths
         let runApps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
         running = Set(runApps.compactMap { $0.bundleURL.map { Self.norm($0.path) } })
+        regularPids = runApps.compactMap { r in r.bundleURL.map { (r.processIdentifier, Self.norm($0.path)) } }
         var e: [DockEntry] = [.app(path: finderPath, pinned: true)]
         var seen: Set<String> = [finderPath]
         let groups = GroupManager.shared.groups
@@ -157,9 +159,10 @@ final class CustomDockModel: ObservableObject {
     func refreshBadges(_ changed: @escaping () -> Void) {
         if badgeAsking { return }
         badgeAsking = true
-        DispatchQueue.global(qos: .utility).async {   // 列出运行中的应用 + 逐个查角标要 25ms 以上，放主线程会掉好几帧
+        let apps = regularPids   // 用上次整理应用列表时记下的进程号，不用每秒把所有运行中的应用重新问一遍（那一步要 25ms）
+        DispatchQueue.global(qos: .utility).async {
             var b: [String: String] = [:]
-            for (pid, path) in Self.regularApps() { if let l = AppBadge.label(pid: pid) { b[path] = l } }
+            for (pid, path) in apps { if let l = AppBadge.label(pid: pid) { b[path] = l } }
             DispatchQueue.main.async {
                 self.badgeAsking = false
                 if b != self.badges { self.badges = b; changed() }
@@ -1458,8 +1461,8 @@ final class CustomDockController {
             CustomDockModel.refreshTrash { [weak self] in self?.bar?.reloadIcons() }
         }
         v.settleGlassIfDue()
-        // 有没有应用中途变成（或不再是）普通应用：2s 核对一次
-        if now.timeIntervalSince(lastAppsCheck) > 2 { lastAppsCheck = now; CustomDockModel.shared.rebuildIfAppsChanged() }
+        // 有没有应用中途变成（或不再是）普通应用：3s 核对一次
+        if now.timeIntervalSince(lastAppsCheck) > 3 { lastAppsCheck = now; CustomDockModel.shared.rebuildIfAppsChanged() }
         // 角标同理：只在看得见时查，1s 一次
         if shown && now.timeIntervalSince(lastBadgeCheck) > 1 {
             lastBadgeCheck = now
