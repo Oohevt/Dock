@@ -49,7 +49,8 @@ class GroupPopupWindow: NSWindow {
     }
 
     private func setupContent() {
-        let w = Self.size(count: group.apps.count).width, h = Self.size(count: group.apps.count).height
+        let n = group.installedApps.count
+        let w = Self.size(count: n).width, h = Self.size(count: n).height
         // 锚点：点击时鼠标位置（Dock 图标处）
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main!
@@ -136,6 +137,7 @@ struct GroupPopupView: View {
     @State private var apps: [AppInfo]
     // 图标只在打开面板时取一次：getIcon() 每次都返回新图片对象，悬停变化重绘时会让所有图标闪一下
     private let icons: [UUID: NSImage]
+    private let missing: [AppInfo]                  // 分组里已卸载、没显示出来的成员
     @State private var hoveredApp: UUID?
     @State private var draggingID: UUID?            // 拖动排序中的应用
     @State private var dragLocation: CGPoint = .zero
@@ -169,8 +171,10 @@ struct GroupPopupView: View {
     init(group: AppGroup, window: NSWindow?) {
         self.group = group
         self.window = window
-        self._apps = State(initialValue: group.apps)
-        self.icons = Dictionary(group.apps.compactMap { a in a.getIcon().map { (a.id, $0) } }, uniquingKeysWith: { a, _ in a })
+        let installed = group.installedApps
+        self._apps = State(initialValue: installed)
+        self.missing = group.apps.filter { a in !installed.contains { $0.id == a.id } }
+        self.icons = Dictionary(installed.compactMap { a in a.getIcon().map { (a.id, $0) } }, uniquingKeysWith: { a, _ in a })
     }
     
     var body: some View {
@@ -232,7 +236,7 @@ struct GroupPopupView: View {
                                 (window as? GroupPopupWindow)?.fit(count: apps.count)
                                 CustomDockController.shared.dropFromGroup(CustomDockModel.norm(app.path), at: NSEvent.mouseLocation)
                             } else {
-                                GroupManager.shared.reorderApps(apps, in: group)
+                                GroupManager.shared.reorderApps(apps + missing, in: group)   // 没显示出来的（已卸载的）成员接在后面，别被排序顺手删掉
                             }
                         })
                     .contextMenu {

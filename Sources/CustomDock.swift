@@ -377,18 +377,23 @@ final class DockBarView: NSView {
                 l.anchorPoint = CGPoint(x: 0.5, y: 0); iconHost.layer?.addSublayer(l); iconLayers[e.id] = l; return l
             }()
             var key = "\(e.id)@\(Int(px))#\(iconVersion)"
-            if case .group(let gid) = e, let g = GroupManager.shared.groups.first(where: { $0.id == gid }) { key += g.apps.map { $0.path }.joined(separator: "|") }
+            if case .group(let gid) = e, let g = GroupManager.shared.groups.first(where: { $0.id == gid }) { key += g.installedApps.map { $0.path }.joined(separator: "|") }
             // 废纸篓空/满、应用更新后换图标：都算进缓存键，变了才重新渲染
             if case .trash = e { key += CustomDockModel.trashFull ? "F" : "E" }
             if case .app(let p, _) = e, let d = (try? FileManager.default.attributesOfItem(atPath: p))?[.modificationDate] as? Date { key += "@\(d.timeIntervalSince1970)" }
             if contentKeys[e.id] != key {
                 if case .app(let p, _) = e { AppIconCache.cache[p] = nil }
-                if let cg = Self.render(image(for: e), px: Int(px.rounded(.up))) {
-                    il.contents = cg
+                let cg = Self.render(image(for: e), px: Int(px.rounded(.up)))
+                if let cg = cg { il.contents = cg }
+                var ready = cg != nil
+                // 分组图标是拿成员图标拼出来的，整体不会是空白，但其中某一格可能是：成员里有空图也算"还没准备好"
+                if ready, case .group(let gid) = e, let g = GroupManager.shared.groups.first(where: { $0.id == gid }),
+                   g.installedApps.prefix(4).contains(where: { a in a.getIcon().map { Self.render($0, px: 32) == nil } ?? false }) { ready = false }
+                if ready {
                     contentKeys[e.id] = key
                     blankRetries[e.id] = nil
                 } else {
-                    // 空图不保存（否则会一直显示空白）；过一会儿再要，间隔逐次加倍：0.5、1、2、4、8、16 秒
+                    // 没准备好的不保存（否则会一直显示空白）；过一会儿再要，间隔逐次加倍：0.5、1、2、4、8、16 秒
                     let n = blankRetries[e.id] ?? 0
                     if n < 6 {
                         blankRetries[e.id] = n + 1

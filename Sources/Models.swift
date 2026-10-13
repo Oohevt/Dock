@@ -85,6 +85,9 @@ struct AppGroup: Codable, Identifiable, Hashable {
     }
     
     // 生成分组图标（复合图标）
+    // 还装在电脑上的成员。已卸载的应用只是不显示，不从分组数据里删：应用更新时文件会短暂消失，外接盘上的应用也可能暂时不在
+    var installedApps: [AppInfo] { apps.filter { FileManager.default.fileExists(atPath: $0.path) } }
+
     func generateIcon(size: CGSize = CGSize(width: 1024, height: 1024)) -> NSImage? {
         // macOS 26+ 会给非标准图标自动加一层圆角底板，所以这里画满整个画布，
         // 让系统底板成为唯一的一层；小图标直接居中排列在上面。
@@ -101,7 +104,7 @@ struct AppGroup: Codable, Identifiable, Hashable {
         NSGradient(colors: [NSColor(white: 1, alpha: 0.14), NSColor(white: 1, alpha: 0.0)])?.draw(in: fp, angle: -90)
         NSColor(white: 1, alpha: 0.55).setStroke(); fp.lineWidth = W * 0.008; fp.stroke()
         let n = 2   // 程序坞/启动器图标最多显示 4 个（2x2），弹窗仍显示全部
-        let shown = Array(apps.prefix(4))
+        let shown = Array(installedApps.prefix(4))
         let area = frameR.insetBy(dx: frameR.width * 0.16, dy: frameR.width * 0.16)
         let gap = area.width * (n == 2 ? 0.12 : 0.08)
         let cell = (area.width - gap * CGFloat(n - 1)) / CGFloat(n)
