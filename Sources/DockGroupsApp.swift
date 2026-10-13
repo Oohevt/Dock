@@ -50,7 +50,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 面板/对话框/设置窗口都关了就把"活动应用"的身份交还出去：
         // 本应用一直是活动应用的话，系统会把每一次鼠标移动都投递给它，实测让 CPU 从 0.04 涨到 0.3（每 6 秒的 CPU 秒数）
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { _ in
-            DispatchQueue.main.async { dgYieldActivationIfIdle(); dgPreviousFrontApp = nil }
+            // 从一个分组直接切到另一个分组时，新面板还开着：这次不还焦点，也别把"原来的应用"忘掉
+            DispatchQueue.main.async { if dgYieldActivationIfIdle() { dgPreviousFrontApp = nil } }
         }
         // kill / 注销发来的 SIGTERM 默认直接杀进程，不走 applicationWillTerminate：转成正常退出
         for sig in [SIGTERM, SIGINT, SIGHUP] {
@@ -78,10 +79,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-func dgYieldActivationIfIdle(prev: NSRunningApplication? = dgPreviousFrontApp) {
-    guard NSApp.isActive else { return }
+// 返回 false = 还有自己的窗口开着，这次没还
+@discardableResult
+func dgYieldActivationIfIdle(prev: NSRunningApplication? = dgPreviousFrontApp) -> Bool {
+    guard NSApp.isActive else { return true }
     // 还有带标题栏的窗口（设置、添加应用、对话框）或分组面板开着，就别放手
-    if NSApp.windows.contains(where: { $0.isVisible && ($0.styleMask.contains(.titled) || $0 is GroupPopupWindow) }) { return }
+    if NSApp.windows.contains(where: { $0.isVisible && ($0.styleMask.contains(.titled) || $0 is GroupPopupWindow) }) { return false }
     // NSApp.deactivate() 在这里不管用（应用仍是最前面的应用），所以直接把焦点还给之前在前面的那个应用
     if let prev = prev, !prev.isTerminated, prev.processIdentifier != ProcessInfo.processInfo.processIdentifier, let url = prev.bundleURL {
         // prev.activate() 返回 true 但系统不一定执行（macOS 14 协作式激活）；走 LaunchServices，和点程序坞图标一样
@@ -90,6 +93,7 @@ func dgYieldActivationIfIdle(prev: NSRunningApplication? = dgPreviousFrontApp) {
     } else {
         NSApp.deactivate()
     }
+    return true
 }
 
 // 模态对话框：结束后交还焦点（模态窗口关闭不会发窗口关闭通知，所以不能靠上面的观察者）。

@@ -64,24 +64,14 @@ final class CustomDockModel: ObservableObject {
     }
 
     // "启动/退出"通知不够：有些应用启动时不带程序坞图标，过一会儿才变成普通应用（或反过来）；
-    // 纯后台应用启动时系统根本不发启动通知。所以还要盯着"运行中的应用列表"和每个应用的"是否显示在程序坞"这个属性
+    // 纯后台应用启动时系统根本不发启动通知。所以还要盯着"运行中的应用列表"，并且每 2 秒核对一次（见 tick）。
+    // 注意：不要对单个 NSRunningApplication 做 KVO —— 应用退出时系统回调会访问到已释放的对象，连续开关应用必崩（实测 50 次内崩）
     private var appsObs: NSKeyValueObservation?
-    private var policyObs: [pid_t: NSKeyValueObservation] = [:]
     private func watchRunningApps() {
-        appsObs = NSWorkspace.shared.observe(\.runningApplications) { [weak self] _, _ in DispatchQueue.main.async { self?.runningAppsChanged() } }
-        runningAppsChanged()
-    }
-    private func runningAppsChanged() {
-        let apps = NSWorkspace.shared.runningApplications
-        let alive = Set(apps.map { $0.processIdentifier })
-        for pid in policyObs.keys where !alive.contains(pid) { policyObs[pid] = nil }
-        for a in apps where policyObs[a.processIdentifier] == nil {
-            policyObs[a.processIdentifier] = a.observe(\.activationPolicy) { [weak self] _, _ in DispatchQueue.main.async { self?.rebuildIfAppsChanged() } }
-        }
-        rebuildIfAppsChanged()
+        appsObs = NSWorkspace.shared.observe(\.runningApplications) { [weak self] _, _ in DispatchQueue.main.async { self?.rebuildIfAppsChanged() } }
     }
     // 该显示的应用集合没变就什么都不做（后台进程来来去去很频繁）
-    private func rebuildIfAppsChanged() {
+    func rebuildIfAppsChanged() {
         let now = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.compactMap { $0.bundleURL.map { Self.norm($0.path) } })
         if now != running { rebuild() }
     }
@@ -245,8 +235,11 @@ final class DockBarView: NSView {
         applyLayout()
     }
     let overlay = NSView()          // 浮层：提示
-    private let tipBg = CALayer()
-    private let tipText = CATextLayer()
+    // 名称提示：毛玻璃胶囊 + 朝下的小箭头（整体一个形状，用遮罩图裁出来）
+    private let tip = NSVisualEffectView()
+    private let tipLabel = NSTextField(labelWithString: "")
+    static let tipPillH: CGFloat = 26, tipArrowH: CGFloat = 6
+    private let barShadow = CALayer(), barShadowMask = CAShapeLayer()
     var mouseX: CGFloat? = nil
     private var tracking: NSTrackingArea?
     private var pressedIndex: Int? = nil
@@ -279,15 +272,18 @@ final class DockBarView: NSView {
         overlay.layer?.masksToBounds = false
         overlay.autoresizingMask = [.width, .height]
         addSubview(overlay)
-        tipBg.backgroundColor = NSColor(white: 0.12, alpha: 0.72).cgColor
-        tipBg.cornerRadius = 8
-        tipBg.opacity = 0
-        tipText.fontSize = 13
-        tipText.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        tipText.foregroundColor = NSColor.white.cgColor
-        tipText.alignmentMode = .center
-        tipBg.addSublayer(tipText)
-        overlay.layer?.addSublayer(tipBg)
+        tip.material = .menu; tip.blendingMode = .behindWindow; tip.state = .active
+        tip.isHidden = true
+        tipLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        tipLabel.textColor = .labelColor; tipLabel.alignment = .center
+        tip.addSubview(tipLabel)
+        overlay.addSubview(tip)
+        // 程序坞条外圈的淡阴影：只画在条的外面（中间挖空，不然会透过玻璃把条本身压暗）
+        barShadow.shadowColor = NSColor.black.cgColor; barShadow.shadowOpacity = 0.26
+        barShadow.shadowRadius = 12; barShadow.shadowOffset = CGSize(width: 0, height: -3)
+        barShadowMask.fillRule = .evenOdd
+        barShadow.mask = barShadowMask
+        layer?.insertSublayer(barShadow, at: 0)
         readSystemPrefs()
         setupDrop()
     }
@@ -417,7 +413,6 @@ final class DockBarView: NSView {
         for (k, l) in iconLayers where !alive.contains(k) { l.removeFromSuperlayer(); iconLayers[k] = nil }
         for (k, l) in dotLayers where !alive.contains(k) { l.removeFromSuperlayer(); dotLayers[k] = nil }
         for (k, l) in sepLayers where !alive.contains(k) { l.removeFromSuperlayer(); sepLayers[k] = nil }
-        tipBg.zPosition = 10
         // 哪些条目要亮运行指示点：在这里算好。以前每帧都算，分组里每个应用都要规范化一次路径（一次磁盘查询），放大时占了三成多 CPU
         runningIDs = Set(model.entries.filter { e in
             if case .app(let p, _) = e { return model.running.contains(p) }
@@ -654,6 +649,11 @@ final class DockBarView: NSView {
             let gf = NSRect(x: ((minX - barPadX) * 2).rounded() / 2, y: (barY * 2).rounded() / 2, width: ((maxX - minX + barPadX * 2) * 2).rounded() / 2, height: barH)
             if abs(gf.minX - lastGlass.minX) > 0.25 || abs(gf.width - lastGlass.width) > 0.25 || abs(gf.minY - lastGlass.minY) > 0.25 {
                 glass.frame = gf; lastGlass = gf
+                let r = NativeDock.cornerRadius
+                barShadow.frame = bounds
+                barShadow.shadowPath = CGPath(roundedRect: gf, cornerWidth: r, cornerHeight: r, transform: nil)
+                let hole = CGMutablePath(); hole.addRect(gf.insetBy(dx: -60, dy: -60)); hole.addRoundedRect(in: gf, cornerWidth: r, cornerHeight: r)
+                barShadowMask.frame = bounds; barShadowMask.path = hole
             }
         }
         for e in list {
@@ -712,26 +712,31 @@ final class DockBarView: NSView {
     func updateTooltip() {
         if mouseX == nil { tipSuppressed = nil }
         guard !menuOpen, dragState?.active != true, slide < 0.01, let mx = mouseX, let i = index(at: NSPoint(x: mx, y: bottomMargin + barH / 2)), let il = iconLayers[model.entries[i].id] else {
-            tipBg.opacity = 0; lastTip = ""; return
+            tip.isHidden = true; lastTip = ""; return
         }
-        if model.entries[i].id == tipSuppressed { tipBg.opacity = 0; lastTip = ""; return }
+        if model.entries[i].id == tipSuppressed { tip.isHidden = true; lastTip = ""; return }
         tipSuppressed = nil
         let text = label(for: model.entries[i])
-        if text == lastTip && tipBg.opacity == 1 {
-            CATransaction.begin(); CATransaction.setDisableActions(true)
-            tipBg.position = CGPoint(x: il.position.x, y: il.frame.maxY + 8 + 12)
-            CATransaction.commit(); return
-        }
+        // 箭头尖离图标顶 4pt
+        let origin = { (w: CGFloat) in NSPoint(x: il.position.x - w / 2, y: il.frame.maxY + 4) }
+        if text == lastTip && !tip.isHidden { tip.setFrameOrigin(origin(tip.frame.width)); return }
         lastTip = text
-        let font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        let w = (text as NSString).size(withAttributes: [.font: font]).width + 20
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        tipText.string = text
-        tipText.contentsScale = window?.backingScaleFactor ?? 2
-        tipBg.frame = CGRect(x: il.position.x - w / 2, y: il.frame.maxY + 8, width: w, height: 24)
-        tipText.frame = CGRect(x: 0, y: 4, width: w, height: 17)
-        tipBg.opacity = 1
-        CATransaction.commit()
+        let pillH = Self.tipPillH, arrowH = Self.tipArrowH
+        let w = ((text as NSString).size(withAttributes: [.font: tipLabel.font!]).width + 26).rounded(.up)
+        tipLabel.stringValue = text
+        tipLabel.frame = NSRect(x: 0, y: arrowH + (pillH - 17) / 2, width: w, height: 17)
+        tip.frame = NSRect(origin: origin(w), size: NSSize(width: w, height: pillH + arrowH))
+        tip.maskImage = NSImage(size: tip.frame.size, flipped: false) { _ in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: NSRect(x: 0, y: arrowH, width: w, height: pillH), xRadius: pillH / 2, yRadius: pillH / 2).fill()
+            let a = NSBezierPath(); let cx = w / 2
+            a.move(to: NSPoint(x: cx - 8, y: arrowH + 0.5))
+            a.curve(to: NSPoint(x: cx, y: 0), controlPoint1: NSPoint(x: cx - 4, y: arrowH + 0.5), controlPoint2: NSPoint(x: cx - 2.5, y: 0))
+            a.curve(to: NSPoint(x: cx + 8, y: arrowH + 0.5), controlPoint1: NSPoint(x: cx + 2.5, y: 0), controlPoint2: NSPoint(x: cx + 4, y: arrowH + 0.5))
+            a.close(); a.fill()
+            return true
+        }
+        tip.isHidden = false
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -767,7 +772,7 @@ final class DockBarView: NSView {
         guard var d = dragState else { return }
         let p = convert(event.locationInWindow, from: nil)
         d.x = p.x - d.offX; d.y = p.y - d.offY
-        if !d.active && hypot(p.x - d.startX, p.y - d.startY) > 6 { d.active = true; reordering = true; mouseX = nil; tipBg.opacity = 0; setPressed(nil) }
+        if !d.active && hypot(p.x - d.startX, p.y - d.startY) > 6 { d.active = true; reordering = true; mouseX = nil; tip.isHidden = true; setPressed(nil) }
         dragState = d
         dropTarget = (d.active && d.id.hasPrefix("app:") && !outsideBar(p.y)) ? centerHit(p.x, Self.isGroup) : nil
         if d.active { NSCursor.current.set(); if outsideBar(p.y) && d.id.hasPrefix("app:") && !isUnpinned(d.id) { NSCursor.disappearingItem.set() } else { NSCursor.arrow.set() } }
@@ -843,7 +848,7 @@ final class DockBarView: NSView {
         dgLog("mouseUp at \(p) index=\(String(describing: hit)) pressed=\(String(describing: pressedIndex))")
         guard let i = hit ?? pressedIndex, i < model.entries.count else { return }
         let e = model.entries[i]
-        tipSuppressed = e.id; tipBg.opacity = 0
+        tipSuppressed = e.id; tip.isHidden = true
         switch e {
         case .app(let path, _):
             if model.runningApp(path) == nil { bounce(e.id, path: path) }
@@ -877,7 +882,7 @@ final class DockBarView: NSView {
         mouseX = p.x; magAmount = magnify ? 1 : 0
         _ = step(dt: 1.0 / 120); applyLayout()
         // 菜单打开期间不显示名称提示：否则提示会被逐帧刷新重新显示，叠在菜单后面
-        menuOpen = true; tipBg.opacity = 0
+        menuOpen = true; tip.isHidden = true
         menu.popUp(positioning: nil, at: pt, in: self)
         menuOpen = false
         // 菜单关闭后按鼠标当前位置重新决定是否放大
@@ -1315,6 +1320,7 @@ final class CustomDockController {
 
     private var lastTrashCheck = Date.distantPast
     private var lastBadgeCheck = Date.distantPast
+    private var lastAppsCheck = Date.distantPast
     private var edgeSince: Date?
 
     private func tick() {
@@ -1342,6 +1348,8 @@ final class CustomDockController {
             lastTrashCheck = now
             CustomDockModel.refreshTrash { [weak self] in self?.bar?.reloadIcons() }
         }
+        // 有没有应用中途变成（或不再是）普通应用：2s 核对一次
+        if now.timeIntervalSince(lastAppsCheck) > 2 { lastAppsCheck = now; CustomDockModel.shared.rebuildIfAppsChanged() }
         // 角标同理：只在看得见时查，1s 一次
         if shown && now.timeIntervalSince(lastBadgeCheck) > 1 {
             lastBadgeCheck = now

@@ -112,13 +112,20 @@ class GroupPopupWindow: NSWindow {
         if event.keyCode == 53 { close() } else { super.keyDown(with: event) }
     }
 
+    // 关闭时淡出（0.1s）而不是直接消失；淡出期间再次调用 close() 不重复处理
+    private var closing = false
     override func close() {
+        if closing { return }
+        closing = true
         dgLastPopupClose = (group.id, Date())
         if let monitor = monitor {
             NSEvent.removeMonitor(monitor)
             self.monitor = nil
         }
-        super.close()
+        NSAnimationContext.runAnimationGroup({ c in
+            c.duration = 0.1; c.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            animator().alphaValue = 0
+        }, completionHandler: { super.close() })
     }
     
     deinit {
