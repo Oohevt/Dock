@@ -244,7 +244,7 @@ final class DockBarView: NSView {
     var menuOpen = false                 // 右键菜单打开期间：保持放大、不收起、不显示名称提示
     private var tipSuppressed: String?   // 刚点过的图标不再显示名称提示（会和弹跳、分组面板叠在一起），鼠标移到别处才恢复
     private let glass: NSView
-    // 玻璃条（和它的阴影）放在单独一个窗口里，垫在图标窗口下面。原因：玻璃控件内部每次所在窗口刷新都要重算一遍（不管它自己变没变），
+    // 玻璃条放在单独一个窗口里，垫在图标窗口下面。原因：玻璃控件内部每次所在窗口刷新都要重算一遍（不管它自己变没变），
     // 和图标同一个窗口的话，悬停放大时每帧都重算，实测 CPU 是系统程序坞的 4 倍。两个窗口大小位置完全相同，所以坐标可以直接通用
     let glassHost = NSView()
     private let iconHost = NSView()
@@ -266,27 +266,6 @@ final class DockBarView: NSView {
     static let tipFont = NSFont.systemFont(ofSize: 13, weight: .medium)
     private let tipOutline = CAShapeLayer()
     static let tipPillH: CGFloat = 26, tipArrowH: CGFloat = 6
-    private let barShadow = CALayer()
-    static let shadowPad: CGFloat = 30   // 阴影图比程序坞条四周各多出的宽度
-    // 苹果的连续曲率圆角（和 cornerCurve = .continuous / 液态玻璃的圆角同形）的贝塞尔近似
-    static func continuousRoundedRect(_ rc: CGRect, radius r: CGFloat) -> CGPath {
-        let p = CGMutablePath()
-        // 每个角：沿边方向 u、转入方向 v，角点 c
-        func corner(_ c: CGPoint, _ u: CGVector, _ v: CGVector, first: Bool) {
-            func pt(_ a: CGFloat, _ b: CGFloat) -> CGPoint { CGPoint(x: c.x + u.dx * a * r + v.dx * b * r, y: c.y + u.dy * a * r + v.dy * b * r) }
-            let start = pt(-1.528665, 0)
-            if first { p.move(to: start) } else { p.addLine(to: start) }
-            p.addCurve(to: pt(-0.631494, 0.074911), control1: pt(-1.088493, 0), control2: pt(-0.868407, 0))
-            p.addCurve(to: pt(-0.074911, 0.631494), control1: pt(-0.372824, 0.169060), control2: pt(-0.169060, 0.372824))
-            p.addCurve(to: pt(0, 1.528665), control1: pt(0, 0.868407), control2: pt(0, 1.088493))
-        }
-        corner(CGPoint(x: rc.maxX, y: rc.minY), CGVector(dx: 1, dy: 0), CGVector(dx: 0, dy: 1), first: true)
-        corner(CGPoint(x: rc.maxX, y: rc.maxY), CGVector(dx: 0, dy: 1), CGVector(dx: -1, dy: 0), first: false)
-        corner(CGPoint(x: rc.minX, y: rc.maxY), CGVector(dx: -1, dy: 0), CGVector(dx: 0, dy: -1), first: false)
-        corner(CGPoint(x: rc.minX, y: rc.minY), CGVector(dx: 0, dy: -1), CGVector(dx: 1, dy: 0), first: false)
-        p.closeSubpath()
-        return p
-    }
     var mouseX: CGFloat? = nil
     private var pressedIndex: Int? = nil
     var onWidthChange: ((CGFloat) -> Void)?
@@ -328,25 +307,6 @@ final class DockBarView: NSView {
         tipOutline.strokeColor = NSColor(white: 0.5, alpha: 0.45).cgColor   // 中性灰：浅色、深色背景上都看得见
         tip.layer?.addSublayer(tipOutline)
         overlay.addSubview(tip)
-        // 程序坞条外圈的淡阴影：只画在条的外面（中间挖空，不然会透过玻璃把条本身压暗）
-        // 阴影预先画成一张图，中间部分拉伸（九宫格）：悬停放大时条的宽度每帧都变，实时阴影要每帧重算，实测让 CPU 从 ~14% 涨到 23%
-        // 连续曲率圆角沿边要占 1.53 倍半径，图要留够这么宽，中间才有一条可拉伸的直边
-        let r = NativeDock.cornerRadius, pad = Self.shadowPad, side = ((r * 1.53).rounded(.up) + pad) * 2 + 2
-        let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
-            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            let bar = CGRect(x: pad, y: pad, width: side - pad * 2, height: side - pad * 2)
-            // 形状必须和玻璃一样用"连续曲率"圆角；用普通圆弧的话拐角处对不齐，边上会多出一条粗细不均的深色细线
-            let shape = Self.continuousRoundedRect(bar, radius: r)
-            ctx.addRect(CGRect(x: 0, y: 0, width: side, height: side)); ctx.addPath(shape); ctx.clip(using: .evenOdd)   // 只留条外面的部分
-            // 要淡、要散：太实的话，浅色背景上它会在玻璃边外面贴出一圈粗细不均的灰线（上面没有、两侧和下面有），看着像边缘毛糙
-            ctx.setShadow(offset: CGSize(width: 0, height: -5), blur: 22, color: NSColor(white: 0, alpha: 0.10).cgColor)
-            ctx.addPath(shape); ctx.setFillColor(NSColor.black.cgColor); ctx.fillPath()
-            return true
-        }
-        barShadow.contents = img
-        barShadow.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
-        barShadow.contentsCenter = CGRect(x: 0.5 - 0.5 / side, y: 0.5 - 0.5 / side, width: 1 / side, height: 1 / side)
-        glassHost.layer?.insertSublayer(barShadow, at: 0)
         readSystemPrefs()
         setupDrop()
     }
@@ -742,7 +702,6 @@ final class DockBarView: NSView {
         guard glassStretched || wantGlass != lastGlass, wantGlass.width > 0 else { return }
         CATransaction.begin(); CATransaction.setDisableActions(true)
         glass.layer?.setAffineTransform(.identity); glass.frame = wantGlass; glassBase = wantGlass; lastGlass = wantGlass; glassStretched = false
-        barShadow.frame = wantGlass.insetBy(dx: -Self.shadowPad, dy: -Self.shadowPad)
         CATransaction.commit()
     }
     func applyLayout() {
@@ -767,11 +726,10 @@ final class DockBarView: NSView {
             wantGlass = gf
             let steady = mouseX != nil && magAmount > 0.98 && slide == slideTarget && !reordering && dragState == nil
             let tol: CGFloat = steady ? 1.5 : 0.25
-            // 拉伸会让玻璃的圆角跟着变形（宽 5% 就差 1 个多点），和阴影的圆角错开成"双层边"。所以拉伸只在放大/滑动的过渡动画里用；
+            // 拉伸会让玻璃的圆角跟着变形（宽 5% 就差 1 个多点），边缘看着发虚。所以拉伸只在放大/滑动的过渡动画里用；
             // 一进入稳定悬停就立刻换回真实尺寸，之后每次更新（1.5pt 的门槛下大约每秒一次）也直接改真实尺寸
             if steady && glassStretched {
                 glass.layer?.setAffineTransform(.identity); glass.frame = gf; glassBase = gf; lastGlass = gf; glassStretched = false
-                barShadow.frame = gf.insetBy(dx: -Self.shadowPad, dy: -Self.shadowPad)
             }
             if abs(gf.minX - lastGlass.minX) > tol || abs(gf.maxX - lastGlass.maxX) > tol || abs(gf.minY - lastGlass.minY) > 0.25 {
                 lastGlass = gf
@@ -785,7 +743,6 @@ final class DockBarView: NSView {
                     gl.setAffineTransform(CGAffineTransform(a: sx, b: 0, c: 0, d: 1, tx: gf.minX - glassBase.minX + ax * (sx - 1), ty: gf.minY - glassBase.minY))
                     glassStretched = true
                 }
-                barShadow.frame = gf.insetBy(dx: -Self.shadowPad, dy: -Self.shadowPad)
             }
         }
         for (i, e) in list.enumerated() {
