@@ -338,7 +338,8 @@ final class DockBarView: NSView {
             // 形状必须和玻璃一样用"连续曲率"圆角；用普通圆弧的话拐角处对不齐，边上会多出一条粗细不均的深色细线
             let shape = Self.continuousRoundedRect(bar, radius: r)
             ctx.addRect(CGRect(x: 0, y: 0, width: side, height: side)); ctx.addPath(shape); ctx.clip(using: .evenOdd)   // 只留条外面的部分
-            ctx.setShadow(offset: CGSize(width: 0, height: -3), blur: 12, color: NSColor(white: 0, alpha: 0.26).cgColor)
+            // 要淡、要散：太实的话，浅色背景上它会在玻璃边外面贴出一圈粗细不均的灰线（上面没有、两侧和下面有），看着像边缘毛糙
+            ctx.setShadow(offset: CGSize(width: 0, height: -5), blur: 22, color: NSColor(white: 0, alpha: 0.10).cgColor)
             ctx.addPath(shape); ctx.setFillColor(NSColor.black.cgColor); ctx.fillPath()
             return true
         }
