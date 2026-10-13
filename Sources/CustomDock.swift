@@ -405,6 +405,7 @@ final class DockBarView: NSView {
 
     func reloadIcons() {
         labelCache.removeAll()
+        entryIDCache = model.entries.map { $0.id }
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         let px = L * scale
         var alive = Set<String>()
@@ -541,12 +542,17 @@ final class DockBarView: NSView {
     // x/y = 被拖图标的中心；offX/offY = 按下时光标相对图标中心的偏移（抓哪儿就拖哪儿，图标不会跳到光标正中）
     struct DragState { var id: String; var index: Int; var x: CGFloat; var y: CGFloat; var startX: CGFloat; var startY: CGFloat; var active: Bool; var offX: CGFloat = 0; var offY: CGFloat = 0 }
 
+    // 有东西变了就调它。刷新定时器在鼠标移动期间一直开着，静止 0.3 秒后才关：
+    // 以前是"来一个鼠标事件 → 新建定时器 → 跑一帧 → 销毁"，建和拆比干活本身还贵（悬停时占主线程三分之一）
+    private var dirty = false
+    private var idleSince: CFTimeInterval = 0   // 从哪一刻起画面没再变过（0 = 还在变）
     func startLink() {
+        dirty = true
         guard link == nil else { return }
         let l = displayLink(target: self, selector: #selector(frameTick(_:)))
         l.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
         l.add(to: .main, forMode: .common)
-        link = l; lastTs = 0
+        link = l; lastTs = 0; idleSince = 0
     }
 
     // 临界阻尼弹簧，ω 越大越快（原生约 0.2s 收敛）
@@ -563,11 +569,37 @@ final class DockBarView: NSView {
 
     @objc func frameTick(_ l: CADisplayLink) {
         let now = l.timestamp
+        if !dirty && idleSince > 0 {
+            // 上一帧已经静止，之后也没有新变化：这一帧什么都不用做；静止满 0.3 秒就关掉定时器
+            if now - idleSince > 0.3 { l.invalidate(); link = nil }
+            return
+        }
+        dirty = false
         let dt = CGFloat(lastTs == 0 ? 1.0 / 120 : min(now - lastTs, 1.0 / 30))
-        lastTs = now
+        // 整帧包在一个事务里：applyLayout 和名字提示各自的 begin/commit 变成嵌套的，不再各自向系统提交一次（原来一帧提交 3 次）
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        frameOrder = nil; frameOrder = ordered()
         let settled = step(dt: dt)
         applyLayout()
-        if settled { l.invalidate(); link = nil; settleAt = CACurrentMediaTime() + 0.25 }
+        frameOrder = nil
+        CATransaction.commit()
+        if settled { idleSince = now; lastTs = 0; settleAt = CACurrentMediaTime() + 0.25 }   // lastTs 清零：下次再动时不要把静止的这段时间算进步长
+        else { idleSince = 0; lastTs = now }
+    }
+
+    // 每个条目的 id 是现拼出来的字符串（"app:" + 路径）。一帧里要用上百次，每次都拼一遍很浪费（悬停时占了近三成的计算），
+    // 所以一帧开头算好一份（条目 + 对应的 id），step 和 applyLayout 共用
+    private var frameOrder: (list: [DockEntry], ids: [String])?
+    func ordered() -> (list: [DockEntry], ids: [String]) {
+        if let c = frameOrder { return c }
+        if dragState?.active != true && dropInsert == nil { return (model.entries, entryIDs) }   // 没在拖动：顺序就是原样，id 用现成的
+        let l = orderedEntries
+        return (l, l.map { $0.id })
+    }
+    private var entryIDCache: [String] = []
+    var entryIDs: [String] {
+        if entryIDCache.count != model.entries.count { entryIDCache = model.entries.map { $0.id } }
+        return entryIDCache
     }
 
     var orderedEntries: [DockEntry] {
@@ -619,19 +651,16 @@ final class DockBarView: NSView {
 
     // 计算每个图标的目标宽度/中心，并逐帧推进；返回是否已静止
     func step(dt: CGFloat) -> Bool {
-        let list = orderedEntries
+        let (list, ids) = ordered()
         var x = (bounds.width - widthOf(list)) / 2 + barPadX
         var settled = true
-        // 1) 宽度（放大）
-        var targetsW: [String: CGFloat] = [:]
-        for e in list {
+        // 1) 宽度（放大）。悬停时宽度直接跟随光标（无弹簧滞后）；只有进入/离开（占位 div99）用缓动
+        for (i, e) in list.enumerated() {
+            let id = ids[i]
             let isDiv: Bool = { if case .divider = e { return true }; return false }()
-            let base: CGFloat = isDiv ? (e.id == "div99" ? S : 13) : S
-            targetsW[e.id] = isDiv ? base : S * targetScale(center: x + S / 2)
+            let base: CGFloat = isDiv ? (id == "div99" ? S : 13) : S
+            let target = isDiv ? base : S * targetScale(center: x + S / 2)
             x += base + (isDiv ? 0 : gap)
-        }
-        // 悬停时宽度直接跟随光标（无弹簧滞后）；只有进入/离开用缓动
-        for (id, target) in targetsW {
             if id == "div99" {
                 var w = dispW[id] ?? 0, v = velW[id] ?? 0
                 Self.spring(&w, &v, to: target, dt: dt, omega: 28)
@@ -645,20 +674,21 @@ final class DockBarView: NSView {
         if abs(magAmount - magT) < 0.001 && abs(magVel) < 0.01 { magAmount = magT; magVel = 0; if magT == 0 { lastMouseX = nil } } else { settled = false }
         // 2) 目标中心（按当前显示宽度排布），位置用欠阻尼弹簧
         var total: CGFloat = 0
-        for e in list { let w = dispW[e.id] ?? S; if case .divider = e { total += w } else { total += w + gap } }
+        for (i, e) in list.enumerated() { let w = dispW[ids[i]] ?? S; if case .divider = e { total += w } else { total += w + gap } }
         total -= gap
         var cx = (bounds.width - total) / 2
         let dragging = dragState?.active == true ? dragState!.id : nil
-        for e in list {
-            let w = dispW[e.id] ?? S
+        for (i, e) in list.enumerated() {
+            let id = ids[i]
+            let w = dispW[id] ?? S
             let center = cx + w / 2
-            if e.id == dragging, let d = dragState {
-                dispX[e.id] = d.x; velX[e.id] = 0
+            if id == dragging, let d = dragState {
+                dispX[id] = d.x; velX[id] = 0
             } else {
-                var px = dispX[e.id] ?? center, v = velX[e.id] ?? 0
+                var px = dispX[id] ?? center, v = velX[id] ?? 0
                 if reordering { Self.bouncy(&px, &v, to: center, dt: dt) } else { px = center; v = 0 }
                 if abs(px - center) < 0.1 && abs(v) < 1 { px = center; v = 0 } else { settled = false }
-                dispX[e.id] = px; velX[e.id] = v
+                dispX[id] = px; velX[id] = v
             }
             if case .divider = e { cx += w } else { cx += w + gap }
         }
@@ -689,7 +719,7 @@ final class DockBarView: NSView {
     // 鼠标停下 0.25 秒后：把玻璃对齐到精确位置、去掉变形。必须延后做 —— 鼠标移动时动画是"每来一个事件跑一帧就停"，
     // 如果一停就对齐，等于每帧都在改玻璃的真实尺寸，比不优化还慢。由控制器的定时器（60Hz）来调
     func settleGlassIfDue() {
-        guard settleAt > 0, link == nil, CACurrentMediaTime() >= settleAt else { return }
+        guard settleAt > 0, !dirty, link == nil || idleSince > 0, CACurrentMediaTime() >= settleAt else { return }
         settleAt = 0
         guard glassStretched || wantGlass != lastGlass, wantGlass.width > 0 else { return }
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -698,15 +728,14 @@ final class DockBarView: NSView {
         CATransaction.commit()
     }
     func applyLayout() {
-        let list = orderedEntries
+        let (list, ids) = ordered()
         CATransaction.begin(); CATransaction.setDisableActions(true)
         let hideOffset = (barH + bottomMargin + 6) * slide
         let barY = bottomMargin - hideOffset
         var minX = CGFloat.greatestFiniteMagnitude, maxX = -CGFloat.greatestFiniteMagnitude
         let dragging = dragState?.active == true ? dragState!.id : nil
-        for e in list where e.id != dragging || !(dragState.map { outsideBar($0.y) } ?? false) {
-            let w = dispW[e.id] ?? S, c = dispX[e.id] ?? 0
-            if e.id == dragging { continue }
+        for id in ids where id != dragging {
+            let w = dispW[id] ?? S, c = dispX[id] ?? 0
             minX = min(minX, c - w / 2); maxX = max(maxX, c + w / 2)
         }
         if minX < maxX {
@@ -731,37 +760,38 @@ final class DockBarView: NSView {
                 barShadow.frame = gf.insetBy(dx: -Self.shadowPad, dy: -Self.shadowPad)
             }
         }
-        for e in list {
-            let w = dispW[e.id] ?? S, c = dispX[e.id] ?? 0
+        for (i, e) in list.enumerated() {
+            let id = ids[i]
+            let w = dispW[id] ?? S, c = dispX[id] ?? 0
             if case .divider = e {
-                if e.id != "div99" { sepLayers[e.id]?.frame = CGRect(x: c - 0.5, y: barY + 12, width: 1, height: barH - 24) }
+                if id != "div99" { sepLayers[id]?.frame = CGRect(x: c - 0.5, y: barY + 12, width: 1, height: barH - 24) }
                 continue
             }
-            guard let il = iconLayers[e.id] else { continue }
-            if e.id == dragging, let d = dragState {
+            guard let il = iconLayers[id] else { continue }
+            if id == dragging, let d = dragState {
                 // 被拖图标：浮层，精确跟随光标
                 let ds = dropTarget == nil ? S : S * 0.7   // 要落进分组时缩小一点
                 il.bounds = CGRect(x: 0, y: 0, width: ds, height: ds)
                 il.position = CGPoint(x: d.x, y: d.y - ds / 2)
                 il.opacity = outsideBar(d.y) ? 0.55 : (dropTarget == nil ? 1 : 0.85)
                 il.zPosition = 5
-                dotLayers[e.id]?.opacity = 0
-                badgeLayers[e.id]?.opacity = 0
+                dotLayers[id]?.opacity = 0
+                badgeLayers[id]?.opacity = 0
                 continue
             }
             il.bounds = CGRect(x: 0, y: 0, width: w, height: w)
             il.position = CGPoint(x: c, y: barY + NativeDock.iconBaseY)
             il.opacity = 1; il.zPosition = 0
             if pressDim.superlayer === il { pressDim.frame = il.bounds; pressMask.frame = il.bounds }
-            il.setAffineTransform(e.id == dropTarget ? CGAffineTransform(scaleX: 1.12, y: 1.12) : .identity)   // 拖放目标：微微鼓起
-            if let b = badgeLayers[e.id] {
+            il.setAffineTransform(id == dropTarget ? CGAffineTransform(scaleX: 1.12, y: 1.12) : .identity)   // 拖放目标：微微鼓起
+            if let b = badgeLayers[id] {
                 // 贴在图标右上角，跟着放大一起变大
-                let h = w * Self.badgeRatio, bw = h * (badgeAspect[e.id] ?? 1), inset = w * 0.02
+                let h = w * Self.badgeRatio, bw = h * (badgeAspect[id] ?? 1), inset = w * 0.02
                 b.frame = CGRect(x: c + w / 2 - inset - bw, y: barY + NativeDock.iconBaseY + w - inset - h, width: bw, height: h)
                 b.opacity = 1
             }
-            let running = runningIDs.contains(e.id)
-            if let d = dotLayers[e.id] {
+            let running = runningIDs.contains(id)
+            if let d = dotLayers[id] {
                 d.frame = CGRect(x: c - NativeDock.dotSize / 2, y: barY + NativeDock.dotY, width: NativeDock.dotSize, height: NativeDock.dotSize)
                 d.opacity = running ? 1 : 0
             }
@@ -776,22 +806,56 @@ final class DockBarView: NSView {
     }
 
     func index(at p: NSPoint) -> Int? {
+        let ids = entryIDs
         for (i, e) in model.entries.enumerated() {
             if case .divider = e { continue }
-            if let l = iconLayers[e.id], l.frame.insetBy(dx: -gap / 2, dy: -12).contains(p) { return i }
+            if let l = iconLayers[ids[i]], l.frame.insetBy(dx: -gap / 2, dy: -12).contains(p) { return i }
         }
         return nil
+    }
+
+    private var tipShapeCache: [CGFloat: (mask: NSImage, outline: CGPath)] = [:]
+    static func makeTipShape(width w: CGFloat, scale: CGFloat) -> (mask: NSImage, outline: CGPath) {
+        let pillH = tipPillH, arrowH = tipArrowH
+        // 胶囊 + 箭头是同一条轮廓：既当遮罩，也描一圈很淡的边（浅色背景上胶囊和背景同色，没有边就看不出来）
+        let shape = CGMutablePath(); let cx = w / 2, by = arrowH
+        shape.addRoundedRect(in: CGRect(x: 0.25, y: by, width: w - 0.5, height: pillH - 0.25), cornerWidth: pillH / 2 - 0.25, cornerHeight: pillH / 2 - 0.25)
+        let arrow = CGMutablePath()
+        arrow.move(to: CGPoint(x: cx - 8, y: by + 0.5))
+        arrow.addCurve(to: CGPoint(x: cx, y: 0.25), control1: CGPoint(x: cx - 4, y: by + 0.5), control2: CGPoint(x: cx - 2.5, y: 0.25))
+        arrow.addCurve(to: CGPoint(x: cx + 8, y: by + 0.5), control1: CGPoint(x: cx + 2.5, y: 0.25), control2: CGPoint(x: cx + 4, y: by + 0.5))
+        arrow.closeSubpath()
+        let size = NSSize(width: w, height: pillH + arrowH)
+        let drawn = NSImage(size: size, flipped: false) { _ in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.setFillColor(NSColor.black.cgColor); ctx.addPath(shape); ctx.fillPath(); ctx.addPath(arrow); ctx.fillPath()
+            return true
+        }
+        // 转成位图再存：带绘制闭包的图片每次用到都可能重新画一遍
+        var px = NSRect(x: 0, y: 0, width: w * scale, height: size.height * scale)
+        let mask = drawn.cgImage(forProposedRect: &px, context: nil, hints: nil).map { NSImage(cgImage: $0, size: size) } ?? drawn
+        // 外轮廓 = 胶囊上半圈 + 两侧 + 箭头两条边（胶囊底边在箭头处断开）
+        let outline = CGMutablePath(); let rr = pillH / 2 - 0.25, top = by + pillH - 0.25
+        outline.move(to: CGPoint(x: cx + 8, y: by + 0.25))
+        outline.addLine(to: CGPoint(x: w - 0.25 - rr, y: by + 0.25))
+        outline.addArc(center: CGPoint(x: w - 0.25 - rr, y: by + rr + 0.25), radius: rr, startAngle: -.pi / 2, endAngle: .pi / 2, clockwise: false)
+        outline.addLine(to: CGPoint(x: 0.25 + rr, y: top + 0.25))
+        outline.addArc(center: CGPoint(x: 0.25 + rr, y: by + rr + 0.25), radius: rr, startAngle: .pi / 2, endAngle: -.pi / 2, clockwise: false)
+        outline.addLine(to: CGPoint(x: cx - 8, y: by + 0.25))
+        outline.addCurve(to: CGPoint(x: cx, y: 0.25), control1: CGPoint(x: cx - 4, y: by + 0.25), control2: CGPoint(x: cx - 2.5, y: 0.25))
+        outline.addCurve(to: CGPoint(x: cx + 8, y: by + 0.25), control1: CGPoint(x: cx + 2.5, y: 0.25), control2: CGPoint(x: cx + 4, y: by + 0.25))
+        return (mask, outline)
     }
 
     private var lastTip = ""
     func updateTooltip() {
         if mouseX == nil { tipSuppressed = nil }
-        guard !menuOpen, dragState?.active != true, slide < 0.01, let mx = mouseX, let i = index(at: NSPoint(x: mx, y: bottomMargin + barH / 2)), let il = iconLayers[model.entries[i].id] else {
+        guard !menuOpen, dragState?.active != true, slide < 0.01, let mx = mouseX, let i = index(at: NSPoint(x: mx, y: bottomMargin + barH / 2)), let il = iconLayers[entryIDs[i]] else {
             tip.isHidden = true; lastTip = ""; return
         }
-        if model.entries[i].id == tipSuppressed { tip.isHidden = true; lastTip = ""; return }
+        if entryIDs[i] == tipSuppressed { tip.isHidden = true; lastTip = ""; return }
         tipSuppressed = nil
-        let text = label(for: model.entries[i])
+        let text = labelCache[entryIDs[i]] ?? label(for: model.entries[i])
         // 箭头尖离图标顶 4pt
         let origin = { (w: CGFloat) in NSPoint(x: il.position.x - w / 2, y: il.frame.maxY + 4) }
         if text == lastTip && !tip.isHidden {
@@ -811,29 +875,13 @@ final class DockBarView: NSView {
         tipLabel.frame = CGRect(x: 0, y: arrowH + (pillH - 17) / 2, width: w, height: 17)
         tip.layer?.setAffineTransform(.identity)
         tip.frame = NSRect(origin: origin(w), size: NSSize(width: w, height: pillH + arrowH))
-        // 胶囊 + 箭头是同一条轮廓：既当遮罩，也描一圈很淡的边（浅色背景上胶囊和背景同色，没有边就看不出来）
-        let shape = CGMutablePath(); let cx = w / 2, by = arrowH
-        shape.addRoundedRect(in: CGRect(x: 0.25, y: by, width: w - 0.5, height: pillH - 0.25), cornerWidth: pillH / 2 - 0.25, cornerHeight: pillH / 2 - 0.25)
-        let arrow = CGMutablePath()
-        arrow.move(to: CGPoint(x: cx - 8, y: by + 0.5))
-        arrow.addCurve(to: CGPoint(x: cx, y: 0.25), control1: CGPoint(x: cx - 4, y: by + 0.5), control2: CGPoint(x: cx - 2.5, y: 0.25))
-        arrow.addCurve(to: CGPoint(x: cx + 8, y: by + 0.5), control1: CGPoint(x: cx + 2.5, y: 0.25), control2: CGPoint(x: cx + 4, y: by + 0.5))
-        arrow.closeSubpath()
-        tip.maskImage = NSImage(size: tip.frame.size, flipped: false) { _ in
-            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            ctx.setFillColor(NSColor.black.cgColor); ctx.addPath(shape); ctx.fillPath(); ctx.addPath(arrow); ctx.fillPath()
-            return true
-        }
-        // 外轮廓 = 胶囊上半圈 + 两侧 + 箭头两条边（胶囊底边在箭头处断开）
-        let outline = CGMutablePath(); let rr = pillH / 2 - 0.25, top = by + pillH - 0.25
-        outline.move(to: CGPoint(x: cx + 8, y: by + 0.25))
-        outline.addLine(to: CGPoint(x: w - 0.25 - rr, y: by + 0.25))
-        outline.addArc(center: CGPoint(x: w - 0.25 - rr, y: by + rr + 0.25), radius: rr, startAngle: -.pi / 2, endAngle: .pi / 2, clockwise: false)
-        outline.addLine(to: CGPoint(x: 0.25 + rr, y: top + 0.25))
-        outline.addArc(center: CGPoint(x: 0.25 + rr, y: by + rr + 0.25), radius: rr, startAngle: .pi / 2, endAngle: -.pi / 2, clockwise: false)
-        outline.addLine(to: CGPoint(x: cx - 8, y: by + 0.25))
-        outline.addCurve(to: CGPoint(x: cx, y: 0.25), control1: CGPoint(x: cx - 4, y: by + 0.25), control2: CGPoint(x: cx - 2.5, y: 0.25))
-        outline.addCurve(to: CGPoint(x: cx + 8, y: by + 0.25), control1: CGPoint(x: cx + 2.5, y: 0.25), control2: CGPoint(x: cx + 4, y: by + 0.25))
+        // 遮罩图和描边只跟宽度有关：同一个宽度做过一次就记下来（每次换字都重画一遍遮罩要 1ms 多）
+        let shapes = tipShapeCache[w] ?? {
+            let made = Self.makeTipShape(width: w, scale: window?.backingScaleFactor ?? 2)
+            tipShapeCache[w] = made; return made
+        }()
+        tip.maskImage = shapes.mask
+        let outline = shapes.outline
         tipOutline.frame = tip.bounds; tipOutline.path = outline
         tip.isHidden = false
     }
