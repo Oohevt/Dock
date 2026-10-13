@@ -268,6 +268,25 @@ final class DockBarView: NSView {
     static let tipPillH: CGFloat = 26, tipArrowH: CGFloat = 6
     private let barShadow = CALayer()
     static let shadowPad: CGFloat = 30   // 阴影图比程序坞条四周各多出的宽度
+    // 苹果的连续曲率圆角（和 cornerCurve = .continuous / 液态玻璃的圆角同形）的贝塞尔近似
+    static func continuousRoundedRect(_ rc: CGRect, radius r: CGFloat) -> CGPath {
+        let p = CGMutablePath()
+        // 每个角：沿边方向 u、转入方向 v，角点 c
+        func corner(_ c: CGPoint, _ u: CGVector, _ v: CGVector, first: Bool) {
+            func pt(_ a: CGFloat, _ b: CGFloat) -> CGPoint { CGPoint(x: c.x + u.dx * a * r + v.dx * b * r, y: c.y + u.dy * a * r + v.dy * b * r) }
+            let start = pt(-1.528665, 0)
+            if first { p.move(to: start) } else { p.addLine(to: start) }
+            p.addCurve(to: pt(-0.631494, 0.074911), control1: pt(-1.088493, 0), control2: pt(-0.868407, 0))
+            p.addCurve(to: pt(-0.074911, 0.631494), control1: pt(-0.372824, 0.169060), control2: pt(-0.169060, 0.372824))
+            p.addCurve(to: pt(0, 1.528665), control1: pt(0, 0.868407), control2: pt(0, 1.088493))
+        }
+        corner(CGPoint(x: rc.maxX, y: rc.minY), CGVector(dx: 1, dy: 0), CGVector(dx: 0, dy: 1), first: true)
+        corner(CGPoint(x: rc.maxX, y: rc.maxY), CGVector(dx: 0, dy: 1), CGVector(dx: -1, dy: 0), first: false)
+        corner(CGPoint(x: rc.minX, y: rc.maxY), CGVector(dx: -1, dy: 0), CGVector(dx: 0, dy: -1), first: false)
+        corner(CGPoint(x: rc.minX, y: rc.minY), CGVector(dx: 0, dy: -1), CGVector(dx: 1, dy: 0), first: false)
+        p.closeSubpath()
+        return p
+    }
     var mouseX: CGFloat? = nil
     private var pressedIndex: Int? = nil
     var onWidthChange: ((CGFloat) -> Void)?
@@ -311,11 +330,13 @@ final class DockBarView: NSView {
         overlay.addSubview(tip)
         // 程序坞条外圈的淡阴影：只画在条的外面（中间挖空，不然会透过玻璃把条本身压暗）
         // 阴影预先画成一张图，中间部分拉伸（九宫格）：悬停放大时条的宽度每帧都变，实时阴影要每帧重算，实测让 CPU 从 ~14% 涨到 23%
-        let r = NativeDock.cornerRadius, pad = Self.shadowPad, side = (r + pad) * 2 + 2
+        // 连续曲率圆角沿边要占 1.53 倍半径，图要留够这么宽，中间才有一条可拉伸的直边
+        let r = NativeDock.cornerRadius, pad = Self.shadowPad, side = ((r * 1.53).rounded(.up) + pad) * 2 + 2
         let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
             let bar = CGRect(x: pad, y: pad, width: side - pad * 2, height: side - pad * 2)
-            let shape = CGPath(roundedRect: bar, cornerWidth: r, cornerHeight: r, transform: nil)
+            // 形状必须和玻璃一样用"连续曲率"圆角；用普通圆弧的话拐角处对不齐，边上会多出一条粗细不均的深色细线
+            let shape = Self.continuousRoundedRect(bar, radius: r)
             ctx.addRect(CGRect(x: 0, y: 0, width: side, height: side)); ctx.addPath(shape); ctx.clip(using: .evenOdd)   // 只留条外面的部分
             ctx.setShadow(offset: CGSize(width: 0, height: -3), blur: 12, color: NSColor(white: 0, alpha: 0.26).cgColor)
             ctx.addPath(shape); ctx.setFillColor(NSColor.black.cgColor); ctx.fillPath()
