@@ -60,6 +60,30 @@ final class CustomDockModel: ObservableObject {
             DispatchQueue.main.async { self?.rebuild() }
         }.store(in: &bag)
         rebuild()
+        watchRunningApps()
+    }
+
+    // "启动/退出"通知不够：有些应用启动时不带程序坞图标，过一会儿才变成普通应用（或反过来）；
+    // 纯后台应用启动时系统根本不发启动通知。所以还要盯着"运行中的应用列表"和每个应用的"是否显示在程序坞"这个属性
+    private var appsObs: NSKeyValueObservation?
+    private var policyObs: [pid_t: NSKeyValueObservation] = [:]
+    private func watchRunningApps() {
+        appsObs = NSWorkspace.shared.observe(\.runningApplications) { [weak self] _, _ in DispatchQueue.main.async { self?.runningAppsChanged() } }
+        runningAppsChanged()
+    }
+    private func runningAppsChanged() {
+        let apps = NSWorkspace.shared.runningApplications
+        let alive = Set(apps.map { $0.processIdentifier })
+        for pid in policyObs.keys where !alive.contains(pid) { policyObs[pid] = nil }
+        for a in apps where policyObs[a.processIdentifier] == nil {
+            policyObs[a.processIdentifier] = a.observe(\.activationPolicy) { [weak self] _, _ in DispatchQueue.main.async { self?.rebuildIfAppsChanged() } }
+        }
+        rebuildIfAppsChanged()
+    }
+    // 该显示的应用集合没变就什么都不做（后台进程来来去去很频繁）
+    private func rebuildIfAppsChanged() {
+        let now = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.compactMap { $0.bundleURL.map { Self.norm($0.path) } })
+        if now != running { rebuild() }
     }
 
     static func norm(_ p: String) -> String {
