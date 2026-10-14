@@ -9,14 +9,12 @@ enum DockEntry: Identifiable, Equatable {
     case group(UUID)
     case trash
     case divider(Int)
-    case minwin(id: String)
     var id: String {
         switch self {
         case .app(let p, _): return "app:" + p
         case .group(let id): return "group:" + id.uuidString
         case .trash: return "trash"
         case .divider(let i): return "div\(i)"
-        case .minwin(let id): return "win:" + id
         }
     }
 }
@@ -152,7 +150,6 @@ final class CustomDockModel: ObservableObject {
         }
         if !extra.isEmpty { e.append(.divider(1)); e += extra }
         e.append(.divider(2))
-        for m in minimized { e.append(.minwin(id: m.id)) }   // 最小化的窗口排在废纸篓左边，和原生一致
         e.append(.trash)
         if e != entries { entries = e }
         CustomDockController.shared.relayout()
@@ -192,43 +189,8 @@ final class CustomDockModel: ObservableObject {
         NSWorkspace.shared.runningApplications.first { $0.bundleURL.map { Self.norm($0.path) } == path }
     }
 
-    // 最小化的窗口。系统不通知"窗口被最小化"，只能像角标那样轮询（辅助功能接口，和右键菜单的窗口列表同一套授权）。
-    // 格子显示应用图标而不是窗口缩略图：缩略图要"屏幕录制"权限，而且对已最小化的窗口截取不可靠；窗口标题放在名称提示里
-    struct MinWin: Equatable { let id: String; let pid: pid_t; let path: String; let title: String }
-    @Published var minimized: [MinWin] = []
-    private var minAsking = false
-    // 刚点过还原的窗口：辅助功能接口还会再报一会儿"仍最小化"。这段时间里轮询结果不准，格子先别弹回来
-    private var hideUntil: [String: Date] = [:]
-    func refreshMinimized(_ changed: @escaping () -> Void) {
-        if minAsking || !AppWindows.trusted { return }
-        minAsking = true
-        let apps = regularPids
-        DispatchQueue.global(qos: .utility).async {
-            var wins: [MinWin] = [], elems: [String: AXUIElement] = [:], seen = Set<String>()
-            // 不问 Electron / Chromium 做的软件：这类软件一发现有程序在用辅助功能读它的窗口，就会整个切到"无障碍模式"，
-            // 而且一直保持到重启 —— 变慢、显示也会变（实测 Typeless 的语音气泡下面多出一块阴影）。代价：它们最小化的窗口不会出现在程序坞里
-            for (pid, path) in apps where !Self.isChromiumBased(path) {
-                for w in AppWindows.minimized(pid: pid) {
-                    var id = w.windowID.map(String.init) ?? "\(pid)-\(w.title)"
-                    if !seen.insert(id).inserted {
-                        var n = 2
-                        while !seen.insert(id + "#\(n)").inserted { n += 1 }
-                        id += "#\(n)"
-                    }
-                    wins.append(MinWin(id: id, pid: pid, path: path, title: w.title)); elems[id] = w.element
-                }
-            }
-            wins.sort { (Int($0.id) ?? Int.max, $0.id) < (Int($1.id) ?? Int.max, $1.id) }
-            DispatchQueue.main.async {
-                self.minAsking = false
-                let now = Date()
-                self.hideUntil = self.hideUntil.filter { id, until in until > now && wins.contains { $0.id == id } }
-                let shown = wins.filter { self.hideUntil[$0.id] == nil }
-                AppWindows.setMinElements(elems)
-                if shown != self.minimized { self.minimized = shown; changed() }
-            }
-        }
-    }
+    // Electron / Chromium 做的软件（Claude、Cursor、Notion、Chrome、Typeless 等）：别用辅助功能去读它们的窗口。
+    // 它们一发现有程序在读，就会整个切到"无障碍模式"并保持到重启 —— 变慢，显示也会变（实测 Typeless 的语音气泡下面多出一块阴影）
     private static var chromiumCache: [String: Bool] = [:]
     private static let chromiumLock = NSLock()
     static func isChromiumBased(_ appPath: String) -> Bool {
@@ -243,13 +205,6 @@ final class CustomDockModel: ObservableObject {
         return hit
     }
 
-    func restoreMinWin(id: String) {
-        guard let m = minimized.first(where: { $0.id == id }) else { return }
-        hideUntil[id] = Date().addingTimeInterval(4)   // 盖过收起时的 3s 轮询，避免格子闪回来
-        AppWindows.restoreMinimized(id, pid: m.pid)
-        minimized.removeAll { $0.id == id }
-        rebuild()
-    }
     func openOrSwitch(_ path: String) {
         dgLog("openOrSwitch \(path)")
         // 用 LaunchServices 打开/激活：已运行则切换，未运行则启动（系统负责激活，避免 macOS 14+ 协作激活限制）
@@ -393,9 +348,6 @@ final class DockBarView: NSView {
         switch e {
         case .app(let p, _): return AppIconCache.icon(forPath: p)
         case .trash: return CustomDockModel.trashIcon()
-        case .minwin(let id):
-            if let p = model.minimized.first(where: { $0.id == id })?.path { return AppIconCache.icon(forPath: p) }
-            return NSImage()
         case .group(let gid):
             if let g = GroupManager.shared.groups.first(where: { $0.id == gid }), let img = g.generateIcon(size: CGSize(width: 512, height: 512)) {
                 return img
@@ -440,10 +392,6 @@ final class DockBarView: NSView {
         case .app(let p, _):
             var n = FileManager.default.displayName(atPath: p); if n.hasSuffix(".app") { n.removeLast(4) }; return n
         case .trash: return "废纸篓"
-        case .minwin(let id):
-            guard let m = model.minimized.first(where: { $0.id == id }) else { return "" }
-            if !m.title.isEmpty { return m.title }
-            var n = FileManager.default.displayName(atPath: m.path); if n.hasSuffix(".app") { n.removeLast(4) }; return n
         case .group(let gid): return GroupManager.shared.groups.first(where: { $0.id == gid })?.name ?? ""
         case .divider: return ""
         }
@@ -1089,7 +1037,6 @@ final class DockBarView: NSView {
         case .group(let gid): openGroup(gid)
         case .trash:
             CustomDockModel.finder("open trash\nactivate")
-        case .minwin(let id): model.restoreMinWin(id: id)
         case .divider: break
         }
     }
@@ -1102,7 +1049,6 @@ final class DockBarView: NSView {
         case .app(let path, let pinned): menu = buildAppMenu(path: path, pinned: pinned)
         case .trash: menu = buildTrashMenu()
         case .group(let gid): menu = buildGroupMenu(gid)
-        case .minwin(let id): menu = buildMinWinMenu(id: id)
         default: return
         }
         // 菜单位置对每个图标固定：左边对齐图标左边缘、向右上方展开，底边在"放大到最大的图标"顶部上方 6pt。
@@ -1193,12 +1139,6 @@ final class DockBarView: NSView {
         return GroupManager.shared.groups.first { $0.id == gid }
     }
 
-    func buildMinWinMenu(id: String) -> NSMenu {
-        let menu = NSMenu(); menu.autoenablesItems = false
-        menu.addItem(ClosureMenuItem(title: "还原") { [weak self] in self?.model.restoreMinWin(id: id) })
-        return menu
-    }
-
     func buildTrashMenu() -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -1212,6 +1152,8 @@ final class DockBarView: NSView {
         return menu
     }
 
+    private static func isChromiumBasedPublic(_ p: String) -> Bool { CustomDockModel.isChromiumBased(p) }
+
     func buildAppMenu(path: String, pinned: Bool) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -1219,7 +1161,9 @@ final class DockBarView: NSView {
         func item(_ t: String, _ f: @escaping () -> Void) -> NSMenuItem { let it = ClosureMenuItem(title: t, action: f); return it }
         if let r = run {
             let pid = r.processIdentifier
-            if AppWindows.trusted {
+            if Self.isChromiumBasedPublic(path) {
+                // Electron / Chromium 软件：不读窗口（见 isChromiumBased 的说明），菜单里就没有窗口列表
+            } else if AppWindows.trusted {
                 // 窗口列表：点哪个切到哪个（已最小化的会还原）
                 let ws = AppWindows.list(pid: pid)
                 for w in ws.prefix(12) {
@@ -1605,8 +1549,6 @@ final class CustomDockController {
             v.mouseX = nil; v.hideTip()
         }
         let now = Date()
-        // 最小化窗口的格子：已关闭（用户不用；而且定时读窗口会让 Electron 软件切到无障碍模式）。要恢复就把轮询加回来：
-        // CustomDockModel.shared.refreshMinimized { CustomDockModel.shared.rebuild() }
         // 已收起且鼠标不在底边：直接返回
         if !shown && !atEdge && p.ignoresMouseEvents && autoHide {
             edgeSince = nil
@@ -1823,7 +1765,7 @@ enum LoginItems {
 // 图标缓存：系统图标 / 自定义覆盖（如 ChatGPT 运行时图标），始终用最大分辨率源
 // 窗口列表和"显示所有窗口"
 enum AppWindows {
-    struct Item { let title: String; let element: AXUIElement; let minimized: Bool; let windowID: Int? }
+    struct Item { let title: String; let element: AXUIElement; let minimized: Bool }
     static var trusted: Bool { AXIsProcessTrusted() }
     // 弹出系统的"辅助功能"授权提示（授权一次即可；签名固定后重装不丢）
     static func requestTrust() { _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) }
@@ -1843,42 +1785,8 @@ enum AppWindows {
     static func list(pid: pid_t) -> [Item] {
         windows(of: pid).compactMap { w in
             guard (attr(w, kAXRoleAttribute) as? String) == kAXWindowRole, let t = attr(w, kAXTitleAttribute) as? String, !t.isEmpty else { return nil }
-            return Item(title: t, element: w, minimized: (attr(w, kAXMinimizedAttribute) as? Bool) ?? false, windowID: nil)
+            return Item(title: t, element: w, minimized: (attr(w, kAXMinimizedAttribute) as? Bool) ?? false)
         }
-    }
-
-    // 只给轮询用。先问"是不是最小化的"：绝大多数窗口不是，后面的标题和窗口号都省掉（每秒每个普通应用走一遍）
-    static func minimized(pid: pid_t) -> [Item] {
-        windows(of: pid).compactMap { w in
-            guard (attr(w, kAXMinimizedAttribute) as? Bool) == true,
-                  (attr(w, kAXRoleAttribute) as? String) == kAXWindowRole else { return nil }
-            let t = attr(w, kAXTitleAttribute) as? String ?? ""
-            return Item(title: t, element: w, minimized: true, windowID: windowID(of: w))
-        }
-    }
-
-    // 窗口的 CGWindowID：拿它当最小化窗口的稳定标识（标题会变，pid 会被重用）。私有符号，取不到就退回"pid+标题"
-    private typealias GetWinID = @convention(c) (AXUIElement, UnsafeMutablePointer<UInt32>) -> Int32
-    private static let getWinID: GetWinID? = {
-        _ = dlopen("/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices", RTLD_LAZY)
-        return dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow").map { unsafeBitCast($0, to: GetWinID.self) }
-    }()
-    static var windowIDAvailable: Bool { getWinID != nil }
-    private static func windowID(of w: AXUIElement) -> Int? {
-        guard let f = getWinID else { return nil }
-        var id: UInt32 = 0
-        return f(w, &id) == 0 ? Int(id) : nil
-    }
-
-    // 轮询时记下的窗口元素，点"还原"时直接用
-    private static var minElements: [String: AXUIElement] = [:]
-    static func setMinElements(_ e: [String: AXUIElement]) { minElements = e }
-    static func restoreMinimized(_ id: String, pid: pid_t) {
-        if let w = minElements[id] {
-            AXUIElementSetAttributeValue(w, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-            AXUIElementPerformAction(w, kAXRaiseAction as CFString)
-        }
-        NSRunningApplication(processIdentifier: pid)?.activate()
     }
 
     static func focus(_ item: Item, pid: pid_t) {
