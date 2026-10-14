@@ -1580,7 +1580,6 @@ final class CustomDockController {
 
     private var lastTrashCheck = Date.distantPast
     private var lastBadgeCheck = Date.distantPast
-    private var lastMinCheck = Date.distantPast
     private var lastAppsCheck = Date.distantPast
     private var lastTopCheck: CFTimeInterval = 0
     private var topIsOurs = true
@@ -1606,11 +1605,8 @@ final class CustomDockController {
             v.mouseX = nil; v.hideTip()
         }
         let now = Date()
-        // 最小化窗口：显示时 1s 核对一次；收起时 3s，保证唤出时不看到旧状态
-        if now.timeIntervalSince(lastMinCheck) > (shown ? 1 : 3) {
-            lastMinCheck = now
-            CustomDockModel.shared.refreshMinimized { CustomDockModel.shared.rebuild() }
-        }
+        // 最小化窗口的格子：已关闭（用户不用；而且定时读窗口会让 Electron 软件切到无障碍模式）。要恢复就把轮询加回来：
+        // CustomDockModel.shared.refreshMinimized { CustomDockModel.shared.rebuild() }
         // 已收起且鼠标不在底边：直接返回
         if !shown && !atEdge && p.ignoresMouseEvents && autoHide {
             edgeSince = nil

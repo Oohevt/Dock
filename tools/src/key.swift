@@ -4,7 +4,7 @@ import Foundation
 // key press 名称 ...   → 依次按键：return esc down up tab space delete
 // key cmd a            → ⌘+字母
 let codes: [String: CGKeyCode] = ["return": 36, "esc": 53, "down": 125, "up": 126, "tab": 48, "space": 49, "delete": 51,
-  "a": 0, "s": 1, "d": 2, "f": 3, "c": 8, "v": 9, "w": 13, "q": 12]
+  "a": 0, "s": 1, "d": 2, "f": 3, "c": 8, "v": 9, "w": 13, "q": 12, "m": 46]
 func tap(_ k: CGKeyCode, flags: CGEventFlags = []) {
   for d in [true, false] { let e = CGEvent(keyboardEventSource: nil, virtualKey: k, keyDown: d); e?.flags = flags; e?.post(tap: .cghidEventTap); usleep(40000) }
 }
