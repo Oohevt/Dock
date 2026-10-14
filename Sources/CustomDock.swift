@@ -1228,7 +1228,12 @@ final class DockBarView: NSView {
         let login = item("登录时打开") { LoginItems.toggle(path) }
         login.state = LoginItems.contains(path) ? .on : .off
         opt.addItem(login)
-        if path == model.finderPath { menu.addItem(item("DockGroups 设置…") { NotificationCenter.default.post(name: .dgOpenSettings, object: nil) }); menu.addItem(.separator()) }
+        if path == model.finderPath {
+            // 菜单栏图标默认隐藏，所以设置和退出的入口放在访达图标的右键菜单里
+            menu.addItem(item("DockGroups 设置…") { NotificationCenter.default.post(name: .dgOpenSettings, object: nil) })
+            menu.addItem(item("退出 DockGroups") { NSApp.terminate(nil) })   // 正常退出：会把系统程序坞还回去
+            menu.addItem(.separator())
+        }
         opt.addItem(item("在访达中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) })
         let optItem = NSMenuItem(title: "选项", action: nil, keyEquivalent: ""); optItem.submenu = opt
         menu.addItem(optItem)
@@ -1703,6 +1708,7 @@ final class CustomDockController {
             sh("defaults write com.apple.dock autohide -bool true; defaults write com.apple.dock autohide-delay -float 1000; defaults write com.apple.dock autohide-time-modifier -float 1000; killall Dock")
         }
         dgRestoreDockOnCrash(restoreCmd)
+        dgStartDockWatchdog(restoreCmd)
     }
     // 退出时把系统程序坞还回去（保留原始设置的记录，下次启动再接管）
     func restoreSystemDock() { sh(restoreCmd) }
@@ -1724,6 +1730,27 @@ final class CustomDockController {
 
 // 崩溃时也要把系统程序坞还回去。信号处理函数里能做的事极少，所以命令行提前备好，只调 posix_spawn
 private var dgCrashArgv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>? = nil
+// 看门进程：被强制退出（活动监视器"强制退出"、kill -9）时本进程什么都来不及做，信号处理也收不到。
+// 所以启动时另起一个独立的小进程盯着本进程：本进程一消失、并且 2 秒内没有新的 DockGroups 起来（重装时会马上重开），
+// 就把系统程序坞还回去。它不是本进程的子任务，本进程被杀它也照常运行
+private var dgWatchdogStarted = false
+func dgStartDockWatchdog(_ restoreCmd: String) {
+    if dgWatchdogStarted { return }
+    dgWatchdogStarted = true
+    let pid = ProcessInfo.processInfo.processIdentifier
+    let script = """
+    while kill -0 \(pid) 2>/dev/null; do sleep 1; done
+    sleep 2
+    pgrep -x DockGroups >/dev/null && exit 0
+    \(restoreCmd)
+    """
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/nohup")
+    p.arguments = ["/bin/sh", "-c", script]
+    p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice; p.standardInput = FileHandle.nullDevice
+    do { try p.run(); dgLog("dock watchdog started pid=\(p.processIdentifier)") } catch { dgLog("dock watchdog failed: \(error)") }
+}
+
 func dgRestoreDockOnCrash(_ cmd: String) {
     let argv = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: 4)
     argv[0] = strdup("/bin/sh"); argv[1] = strdup("-c"); argv[2] = strdup(cmd); argv[3] = nil
