@@ -1580,6 +1580,7 @@ final class CustomDockController {
             frameWindow(moved: true)
             edgeSince = nil
         }
+        parkIfHidden()
         let dock = dockInfo
         let atEdge = edgeDisplay(m) == dock.id
         // 兜底：程序坞已经收起（或正在收起）时，名称提示绝不该还在。出现过一次"程序坞没了、提示还留在屏幕底边"，原因没查明，
@@ -1673,7 +1674,22 @@ final class CustomDockController {
         v.startLink()
     }
 
-    func show() { shown = true; bar?.slideTarget = 0; bar?.startLink() }
+    func show() { shown = true; putBack(); bar?.slideTarget = 0; bar?.startLink() }
+
+    // 收起后把两块窗口从屏幕上撤掉。它们比玻璃条高（要给放大和名字提示留位置），收起后虽然看不见，
+    // 但别的软件（比如 Typeless 的语音气泡）会把它当成"底下有东西"，把自己挪到它上面去
+    private var parked = false
+    private func parkIfHidden() {
+        guard !shown, !parked, let p = panel, let v = bar, v.slide >= 1, v.slideTarget >= 1, v.dragState == nil, !popupOpen() else { return }
+        parked = true
+        glassPanel?.orderOut(nil); p.orderOut(nil)
+    }
+    private func putBack() {
+        guard parked, let p = panel else { return }
+        parked = false
+        p.orderFrontRegardless()
+        if let g = glassPanel { g.orderFrontRegardless(); p.addChildWindow(g, ordered: .below) }
+    }
     func hide() { shown = false; bar?.pointerOwned = false; bar?.slideTarget = 1; bar?.mouseX = nil; bar?.hideTip(); bar?.startLink() }
 
     // MARK: 系统程序坞开关
