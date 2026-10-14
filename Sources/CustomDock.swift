@@ -205,7 +205,9 @@ final class CustomDockModel: ObservableObject {
         let apps = regularPids
         DispatchQueue.global(qos: .utility).async {
             var wins: [MinWin] = [], elems: [String: AXUIElement] = [:], seen = Set<String>()
-            for (pid, path) in apps {
+            // 不问 Electron / Chromium 做的软件：这类软件一发现有程序在用辅助功能读它的窗口，就会整个切到"无障碍模式"，
+            // 而且一直保持到重启 —— 变慢、显示也会变（实测 Typeless 的语音气泡下面多出一块阴影）。代价：它们最小化的窗口不会出现在程序坞里
+            for (pid, path) in apps where !Self.isChromiumBased(path) {
                 for w in AppWindows.minimized(pid: pid) {
                     var id = w.windowID.map(String.init) ?? "\(pid)-\(w.title)"
                     if !seen.insert(id).inserted {
@@ -227,6 +229,20 @@ final class CustomDockModel: ObservableObject {
             }
         }
     }
+    private static var chromiumCache: [String: Bool] = [:]
+    private static let chromiumLock = NSLock()
+    static func isChromiumBased(_ appPath: String) -> Bool {
+        chromiumLock.lock(); defer { chromiumLock.unlock() }
+        if let c = chromiumCache[appPath] { return c }
+        let fw = (try? FileManager.default.contentsOfDirectory(atPath: appPath + "/Contents/Frameworks")) ?? []
+        let hit = fw.contains { n in
+            let l = n.lowercased()
+            return l.hasSuffix(".framework") && (l.contains("electron") || l.contains("chromium") || l.contains("chrome") || l.contains("edge framework") || l.contains("brave") || l.contains("vivaldi") || l.contains("opera"))
+        }
+        chromiumCache[appPath] = hit
+        return hit
+    }
+
     func restoreMinWin(id: String) {
         guard let m = minimized.first(where: { $0.id == id }) else { return }
         hideUntil[id] = Date().addingTimeInterval(4)   // 盖过收起时的 3s 轮询，避免格子闪回来
