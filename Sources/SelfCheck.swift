@@ -19,8 +19,9 @@ enum SelfCheck {
         add("expose.symbol", AppWindows.exposeAvailable, "CoreDockSendNotification")
         // 后台不收鼠标移动事件（悬停时省一半 CPU）
         add("pointer.bgmask", BackgroundMouseMoved.available, "SLSGetBackgroundEventMask / SLSSetBackgroundEventMask")
-        // 窗口列表需要辅助功能授权
-        add("accessibility", AppWindows.trusted, AppWindows.trusted ? "" : "未授权：右键菜单里不会列出窗口")
+        // 窗口列表和最小化窗口都走辅助功能；窗口号是私有符号，没有就退回 pid+标题
+        add("accessibility", AppWindows.trusted, AppWindows.trusted ? "" : "未授权：右键菜单不列窗口，最小化窗口也不会出现")
+        add("minwin.windowid", AppWindows.windowIDAvailable, "_AXUIElementGetWindow")
         // 系统程序坞是否已被压下去（延迟 1000 秒）
         if CustomDockController.shared.enabled {
             CFPreferencesAppSynchronize("com.apple.dock" as CFString)

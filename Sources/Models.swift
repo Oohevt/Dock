@@ -32,28 +32,11 @@ struct AppInfo: Codable, Identifiable, Hashable {
         let name = bundle.object(forInfoDictionaryKey: "CFBundleName") as? String 
                    ?? url.deletingPathExtension().lastPathComponent
         let bundleId = bundle.bundleIdentifier ?? ""
-        
-        // 获取应用图标
-        var iconData: Data?
-        if let iconFile = bundle.object(forInfoDictionaryKey: "CFBundleIconFile") as? String {
-            let iconURL = bundle.url(forResource: iconFile, withExtension: nil)
-                         ?? bundle.url(forResource: iconFile, withExtension: "icns")
-            if let iconURL = iconURL, let icon = NSImage(contentsOf: iconURL) {
-                iconData = nil; _ = icon
-            }
-        }
-        
-        // 如果没有找到，使用工作区图标
-        if iconData == nil {
-            let icon = NSWorkspace.shared.icon(forFile: url.path)
-            iconData = nil; _ = icon
-        }
-        
+
         return AppInfo(
             name: name,
             bundleIdentifier: bundleId,
-            path: url.path,
-            iconData: iconData
+            path: url.path
         )
     }
     

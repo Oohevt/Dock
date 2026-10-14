@@ -89,6 +89,7 @@ struct ManageGroupsView: View {
             // 右侧：分组详情
             if let group = selectedGroup {
                 GroupDetailView(group: group)
+                    .id(group.id)   // 换分组要当新视图重建，否则 @State 里的应用列表还是上一个分组的
                     .frame(minWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(spacing: 12) {
