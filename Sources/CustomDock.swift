@@ -1653,12 +1653,14 @@ final class CustomDockController {
     }
     private func readDock(_ key: String) -> Any? { CFPreferencesCopyAppValue(key as CFString, "com.apple.dock" as CFString) }
 
+    // 命令里重启系统程序坞的写法：先正常让它退出；1.5 秒后如果还是同一个进程（它卡死了，不理普通退出请求——实测出现过一次，
+    // 界面卡在显示状态、也不读新设置），就强制结束，系统会马上把它重新拉起来
     private var restoreCmd: String {
         let delay = ud.object(forKey: "origAutohideDelay") as? Double ?? 0
         let ah = ud.object(forKey: "origAutohide") as? Bool ?? true
         let tm = ud.object(forKey: "origTimeModifier") as? Double ?? 0
         let tmCmd = tm > 0 ? "defaults write com.apple.dock autohide-time-modifier -float \(tm)" : "defaults delete com.apple.dock autohide-time-modifier"
-        return "defaults write com.apple.dock autohide -bool \(ah ? "true" : "false"); defaults write com.apple.dock autohide-delay -float \(delay); \(tmCmd); killall Dock"
+        return "defaults write com.apple.dock autohide -bool \(ah ? "true" : "false"); defaults write com.apple.dock autohide-delay -float \(delay); \(tmCmd); P=$(pgrep -x Dock); killall Dock; sleep 1.5; [ -n \"$P\" ] && [ \"$(pgrep -x Dock)\" = \"$P\" ] && killall -KILL Dock"
     }
     // 接管系统程序坞，两个设置都要改（已经是了就不动它）：
     //  - autohide-delay = 1000：鼠标停在底边 1000 秒才唤出，普通桌面上等于藏起来
@@ -1675,7 +1677,7 @@ final class CustomDockController {
         // 0 表示"用户没设过"；读到 1000 说明是我们上次留下的，不能当成用户的原值
         if ud.object(forKey: "origTimeModifier") == nil { ud.set((tm == nil || tm == 1000) ? 0 : tm!, forKey: "origTimeModifier") }
         if delay != 1000 || tm != 1000 {
-            sh("defaults write com.apple.dock autohide -bool true; defaults write com.apple.dock autohide-delay -float 1000; defaults write com.apple.dock autohide-time-modifier -float 1000; killall Dock")
+            sh("defaults write com.apple.dock autohide -bool true; defaults write com.apple.dock autohide-delay -float 1000; defaults write com.apple.dock autohide-time-modifier -float 1000; P=$(pgrep -x Dock); killall Dock; sleep 1.5; [ -n \"$P\" ] && [ \"$(pgrep -x Dock)\" = \"$P\" ] && killall -KILL Dock")
         }
         dgRestoreDockOnCrash(restoreCmd)
         dgStartDockWatchdog(restoreCmd)
