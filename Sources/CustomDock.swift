@@ -1604,7 +1604,7 @@ final class CustomDockController {
         if atEdge { if edgeSince == nil { edgeSince = Date() } } else { edgeSince = nil }
         let revealDelay = ud.object(forKey: "origAutohideDelay") as? Double ?? 0
         if !shown && atEdge && Date().timeIntervalSince(edgeSince ?? Date()) >= revealDelay { dgLog("autohide: show"); show() }
-        else if shown && !overBar && !atEdge && Date().timeIntervalSince(lastInside) > 0.05 && !popupOpen() && !v.menuOpen && v.dragState == nil { dgLog("autohide: hide"); hide() }
+        else if shown && !overBar && !atEdge && Date().timeIntervalSince(lastInside) > 0.05 && !popupOpen() && !v.menuOpen && v.dragState == nil { dgLog("autohide: hide m=\(m) local=\(local) glass=\(g) topY=\(topY) panel=\(p.frame) parked=\(parked) visible=\(p.isVisible) slide=\(v.slide)"); hide() }
     }
     private func popupOpen() -> Bool { NSApp.windows.contains { $0 is GroupPopupWindow && $0.isVisible } }
 

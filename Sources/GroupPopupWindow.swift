@@ -92,6 +92,7 @@ class GroupPopupWindow: NSWindow {
             if event.type == .keyDown && event.keyCode == 53 { // Esc key
                 self?.close()
             } else if event.type == .leftMouseDown || event.type == .rightMouseDown {
+                dgLog("popup outside-click at \(NSEvent.mouseLocation) popup=\(self?.frame ?? .zero)")
                 // 检查点击是否在窗口外
                 if let window = self, let clickLocation = self?.mouseLocationOutsideOfEventStream {
                     let windowFrame = window.frame
@@ -117,6 +118,7 @@ class GroupPopupWindow: NSWindow {
     override func close() {
         if closing { return }
         closing = true
+        dgLog("popup close \(group.name) active=\(NSApp.isActive) key=\(isKeyWindow)")
         dgLastPopupClose = (group.id, Date())
         if let monitor = monitor {
             NSEvent.removeMonitor(monitor)

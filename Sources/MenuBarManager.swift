@@ -113,6 +113,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
     private var currentPopup: GroupPopupWindow?
 
     func showGroupPopup(for group: AppGroup) {
+        dgLog("popup show \(group.name) current=\(currentPopup.map { "\($0.group.name) vis=\($0.isVisible)" } ?? "nil") lastClose=\(dgLastPopupClose.map { String(format: "%.2fs ago", Date().timeIntervalSince($0.time)) } ?? "nil")")
         if let p = currentPopup, p.isVisible {
             let same = p.group.id == group.id
             p.close()
@@ -132,6 +133,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         window.setFrame(final.offsetBy(dx: 0, dy: -8), display: false)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak window] in dgLog("popup opened active=\(NSApp.isActive) key=\(window?.isKeyWindow ?? false) visible=\(window?.isVisible ?? false)") }
         NSAnimationContext.runAnimationGroup { c in
             c.duration = 0.14; c.timingFunction = CAMediaTimingFunction(name: .easeOut)
             window.animator().alphaValue = 1
