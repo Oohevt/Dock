@@ -1525,6 +1525,8 @@ final class CustomDockController {
     private var lastTrashCheck = Date.distantPast
     private var lastBadgeCheck = Date.distantPast
     private var lastAppsCheck = Date.distantPast
+    // 鼠标离开程序坞附近后，等多久才收起（原来 0.05 秒，蹭出去一下就收，容易闪）
+    static let hideGrace: TimeInterval = 0.3
     private var lastTopCheck: CFTimeInterval = 0
     private var topIsOurs = true
     private var edgeSince: Date?
@@ -1579,6 +1581,8 @@ final class CustomDockController {
         let g = v.lastGlass
         let topY = g.maxY + (v.mouseX != nil || v.dragState?.active == true ? (v.L - v.S) + 4 : 4)
         let overBar = local.x >= g.minX - 4 && local.x <= g.maxX + 4 && local.y >= 0 && local.y <= topY
+        // 决定"要不要收起"用宽一点的范围：鼠标在条外 24pt、条上方 24pt 以内都算还在附近，蹭出去一点不会立刻收
+        let nearBar = local.x >= g.minX - 24 && local.x <= g.maxX + 24 && local.y >= -2 && local.y <= topY + 24
         let ign = !(overBar && shown)
         if p.ignoresMouseEvents != ign { p.ignoresMouseEvents = ign }
         // 鼠标归不归我们：除了在条的范围内，还要求鼠标正下方最上面的窗口是我们（别的应用的菜单/浮层盖在程序坞上时不放大）。
@@ -1600,11 +1604,11 @@ final class CustomDockController {
         // 设置之类的普通窗口开着时也不压（它们在后台时的悬停效果要靠这些事件）
         if !v.menuOpen && !NSApp.isActive && !NSApp.windows.contains(where: { $0.isVisible && $0.styleMask.contains(.titled) }) { BackgroundMouseMoved.suppress() }
         if !autoHide { if !shown { show() }; return }
-        if atEdge || (shown && overBar) { lastInside = Date() }
+        if atEdge || (shown && nearBar) { lastInside = Date() }
         if atEdge { if edgeSince == nil { edgeSince = Date() } } else { edgeSince = nil }
         let revealDelay = ud.object(forKey: "origAutohideDelay") as? Double ?? 0
         if !shown && atEdge && Date().timeIntervalSince(edgeSince ?? Date()) >= revealDelay { dgLog("autohide: show"); show() }
-        else if shown && !overBar && !atEdge && Date().timeIntervalSince(lastInside) > 0.05 && !popupOpen() && !v.menuOpen && v.dragState == nil { dgLog("autohide: hide m=\(m) local=\(local) glass=\(g) topY=\(topY) panel=\(p.frame) parked=\(parked) visible=\(p.isVisible) slide=\(v.slide)"); hide() }
+        else if shown && !overBar && !atEdge && Date().timeIntervalSince(lastInside) > Self.hideGrace && !popupOpen() && !v.menuOpen && v.dragState == nil { dgLog("autohide: hide m=\(m) local=\(local) glass=\(g) topY=\(topY) panel=\(p.frame) parked=\(parked) visible=\(p.isVisible) slide=\(v.slide)"); hide() }
     }
     private func popupOpen() -> Bool { NSApp.windows.contains { $0 is GroupPopupWindow && $0.isVisible } }
 
