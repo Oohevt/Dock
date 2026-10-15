@@ -1525,6 +1525,27 @@ final class CustomDockController {
     private var lastTrashCheck = Date.distantPast
     private var lastBadgeCheck = Date.distantPast
     private var lastAppsCheck = Date.distantPast
+    private var lastSysDockCheck = Date.distantPast
+    private var sysDockOffSince: Date?
+    private var sysDockHealAttempt = 0
+    // 自动修复：出现过一次系统程序坞"卡在显示"——它的运行时"自动隐藏"被关掉了（设置文件里还是开着），而且不再读设置。
+    // 原因没查到（启动台复现不了），所以不猜原因，直接修：关掉超过 15 秒（排除启动台/调度中心时它自己临时关一下的情况），
+    // 先让它把自动隐藏打开；10 秒后还是关的，就强制重启它
+    private func healSystemDock() {
+        guard enabled, let on = SystemDockAPI.autoHideEnabled() else { return }
+        if on { sysDockOffSince = nil; sysDockHealAttempt = 0; return }
+        let since = sysDockOffSince ?? Date(); sysDockOffSince = since
+        let off = Date().timeIntervalSince(since)
+        if off > 15 && sysDockHealAttempt == 0 {
+            sysDockHealAttempt = 1
+            dgLog("system Dock autohide found OFF for \(Int(off))s — turning it back on")
+            SystemDockAPI.setAutoHide(true)
+        } else if off > 25 && sysDockHealAttempt == 1 {
+            sysDockHealAttempt = 2
+            dgLog("system Dock still not hiding — force restarting it")
+            sh("defaults write com.apple.dock autohide -bool true; P=$(pgrep -x Dock); killall Dock; sleep 1.5; [ -n \"$P\" ] && [ \"$(pgrep -x Dock)\" = \"$P\" ] && killall -KILL Dock")
+        }
+    }
     // 鼠标离开程序坞附近后，等多久才收起（原来 0.05 秒，蹭出去一下就收，容易闪）
     static let hideGrace: TimeInterval = 0.15
     private var lastTopCheck: CFTimeInterval = 0
@@ -1542,6 +1563,8 @@ final class CustomDockController {
             edgeSince = nil
         }
         parkIfHidden()
+        // 系统程序坞的"自动隐藏"被谁关掉了：5 秒查一次（读一下不到 1 微秒）。放在"收起时提前返回"之前，收起时也要查
+        if Date().timeIntervalSince(lastSysDockCheck) > 5 { lastSysDockCheck = Date(); healSystemDock() }
         let dock = dockInfo
         let atEdge = edgeDisplay(m) == dock.id
         // 兜底：程序坞已经收起（或正在收起）时，名称提示绝不该还在。出现过一次"程序坞没了、提示还留在屏幕底边"，原因没查明，
@@ -1565,6 +1588,7 @@ final class CustomDockController {
             CustomDockModel.refreshTrash { [weak self] in self?.bar?.reloadIcons() }
         }
         v.settleGlassIfDue()
+
         // 有没有应用中途变成（或不再是）普通应用：3s 核对一次
         if now.timeIntervalSince(lastAppsCheck) > 3 { lastAppsCheck = now; CustomDockModel.shared.rebuildIfAppsChanged() }
         // 角标同理：只在看得见时查，1s 一次
@@ -1815,6 +1839,17 @@ enum AppWindows {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { send("com.apple.expose.front.awake" as CFString, 0) }
         return true
     }
+}
+
+// 系统程序坞运行时的"自动隐藏"状态（私有 CoreDock 接口，系统偏好里的那个开关就是调它）
+enum SystemDockAPI {
+    private typealias G = @convention(c) () -> Bool
+    private typealias S = @convention(c) (Bool) -> Void
+    private static let getFn = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CoreDockGetAutoHideEnabled").map { unsafeBitCast($0, to: G.self) }
+    private static let setFn = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CoreDockSetAutoHideEnabled").map { unsafeBitCast($0, to: S.self) }
+    static var available: Bool { getFn != nil && setFn != nil }
+    static func autoHideEnabled() -> Bool? { getFn?() }
+    static func setAutoHide(_ on: Bool) { setFn?(on) }
 }
 
 // 私有 SkyLight 接口：应用在后台时，窗口服务器还给它投递哪些事件。
