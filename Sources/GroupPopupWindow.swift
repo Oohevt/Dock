@@ -20,7 +20,9 @@ class GroupPopupWindow: NSWindow {
         
         self.isOpaque = false
         self.backgroundColor = .clear
-        self.level = .floating
+        // 比程序坞（21）高一级：盖得住微信、Tinycast 这类悬浮窗（8、9）和通知中心（21）；
+        // 但要低于截图遮罩之类的全屏覆盖层（.statusBar = 25），截图时不能把面板留在上面
+        self.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) + 2)
         self.hasShadow = false
         self.isMovableByWindowBackground = false
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
