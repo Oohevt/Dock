@@ -7,12 +7,14 @@ import Combine
 enum DockEntry: Identifiable, Equatable {
     case app(path: String, pinned: Bool)
     case group(UUID)
+    case folder(String)     // 固定的文件夹：和应用、分组一起排在固定区
     case trash
     case divider(Int)
     var id: String {
         switch self {
         case .app(let p, _): return "app:" + p
         case .group(let id): return "group:" + id.uuidString
+        case .folder(let p): return "folder:" + p
         case .trash: return "trash"
         case .divider(let i): return "div\(i)"
         }
@@ -41,7 +43,7 @@ final class CustomDockModel: ObservableObject {
             rebuild()
         }
     }
-    // 统一顺序（应用和分组可自由交错）："app:<path>" / "group:<uuid>"
+    // 统一顺序（应用、分组、文件夹可自由交错）："app:<path>" / "group:<uuid>" / "folder:<path>"
     var order: [String] {
         get {
             if let o = ud.stringArray(forKey: "customDockOrder") { return o }
@@ -137,6 +139,10 @@ final class CustomDockModel: ObservableObject {
                 if !grouped.contains(p) && !seen.contains(p) && FileManager.default.fileExists(atPath: p) { e.append(.app(path: p, pinned: true)); seen.insert(p) }
             } else if tok.hasPrefix("group:"), let id = UUID(uuidString: String(tok.dropFirst(6))), groups.contains(where: { $0.id == id }), !seenGroups.contains(id) {
                 e.append(.group(id)); seenGroups.insert(id)
+            } else if tok.hasPrefix("folder:") {
+                // 文件夹暂时不在（外接盘没插、被改名）只是不显示，不从顺序里删
+                let p = String(tok.dropFirst(7)); var dir: ObjCBool = false
+                if !seen.contains(tok) && FileManager.default.fileExists(atPath: p, isDirectory: &dir) && dir.boolValue { e.append(.folder(p)); seen.insert(tok) }
             }
         }
         for g in groups.sorted(by: { $0.order < $1.order }) where !seenGroups.contains(g.id) { e.append(.group(g.id)) }
@@ -216,6 +222,7 @@ final class CustomDockModel: ObservableObject {
     }
     func pin(_ p: String) { var l = pinned; if !l.contains(p) { l.append(p) }; pinned = l }
     func unpin(_ p: String) { pinned = pinned.filter { $0 != p } }
+    func unpinFolder(_ p: String) { order = order.filter { $0 != "folder:" + p } }
 }
 
 
@@ -348,6 +355,7 @@ final class DockBarView: NSView {
         switch e {
         case .app(let p, _): return AppIconCache.icon(forPath: p)
         case .trash: return CustomDockModel.trashIcon()
+        case .folder(let p): return AppIconCache.icon(forPath: p)
         case .group(let gid):
             if let g = GroupManager.shared.groups.first(where: { $0.id == gid }), let img = g.generateIcon(size: CGSize(width: 512, height: 512)) {
                 return img
@@ -392,6 +400,7 @@ final class DockBarView: NSView {
         case .app(let p, _):
             var n = FileManager.default.displayName(atPath: p); if n.hasSuffix(".app") { n.removeLast(4) }; return n
         case .trash: return "废纸篓"
+        case .folder(let p): return FileManager.default.displayName(atPath: p)
         case .group(let gid): return GroupManager.shared.groups.first(where: { $0.id == gid })?.name ?? ""
         case .divider: return ""
         }
@@ -937,6 +946,7 @@ final class DockBarView: NSView {
             var draggable = false
             if case .app = e, i > 0 { draggable = true }   // 包括分隔线右边"在运行但没固定"的应用；访达（第 0 个）不能动
             if case .group = e { draggable = true }
+            if case .folder = e { draggable = true }
             if draggable {
                 var d = DragState(id: e.id, index: i, x: p.x, y: p.y, startX: p.x, startY: p.y, active: false)
                 if let il = iconLayers[e.id], il.bounds.width > 1 {
@@ -956,7 +966,7 @@ final class DockBarView: NSView {
         if !d.active && hypot(p.x - d.startX, p.y - d.startY) > 6 { d.active = true; reordering = true; mouseX = nil; tip.isHidden = true; setPressed(nil) }
         dragState = d
         dropTarget = (d.active && d.id.hasPrefix("app:") && !outsideBar(p.y)) ? centerHit(p.x, Self.isGroup) : nil
-        if d.active { NSCursor.current.set(); if outsideBar(p.y) && d.id.hasPrefix("app:") && !isUnpinned(d.id) { NSCursor.disappearingItem.set() } else { NSCursor.arrow.set() } }
+        if d.active { NSCursor.current.set(); if outsideBar(p.y) && (d.id.hasPrefix("app:") || d.id.hasPrefix("folder:")) && !isUnpinned(d.id) { NSCursor.disappearingItem.set() } else { NSCursor.arrow.set() } }
         startLink()
     }
 
@@ -990,6 +1000,12 @@ final class DockBarView: NSView {
                     dragState = nil
                     commitOrder(list)
                 } else { dispX[d.id] = d.x; velX[d.id] = 0; reordering = true }
+                dragState = nil; startLink(); return
+            }
+            if case .folder(let path) = dragged {
+                // 文件夹：拖出 = 从程序坞移除（文件夹本身不动）；在条内 = 保存新顺序
+                if outsideBar(d.y) { poof(at: p); dragState = nil; model.unpinFolder(path) }
+                else { let list = orderedEntries; dispX[d.id] = d.x; velX[d.id] = 0; reordering = true; dragState = nil; commitOrder(list) }
                 dragState = nil; startLink(); return
             }
             if case .app(let path, _) = dragged {
@@ -1035,6 +1051,7 @@ final class DockBarView: NSView {
             if model.runningApp(path) == nil { bounce(e.id, path: path) }
             model.openOrSwitch(path)
         case .group(let gid): openGroup(gid)
+        case .folder(let p): NSWorkspace.shared.open(URL(fileURLWithPath: p, isDirectory: true))
         case .trash:
             CustomDockModel.finder("open trash\nactivate")
         case .divider: break
@@ -1049,6 +1066,7 @@ final class DockBarView: NSView {
         case .app(let path, let pinned): menu = buildAppMenu(path: path, pinned: pinned)
         case .trash: menu = buildTrashMenu()
         case .group(let gid): menu = buildGroupMenu(gid)
+        case .folder(let p): menu = buildFolderMenu(p)
         default: return
         }
         // 菜单位置对每个图标固定：左边对齐图标左边缘、向右上方展开，底边在"放大到最大的图标"顶部上方 6pt。
@@ -1123,6 +1141,15 @@ final class DockBarView: NSView {
             dgRememberFrontApp(); NSApp.activate(ignoringOtherApps: true)
             if dgRunAlert(a) == .alertFirstButtonReturn { GroupManager.shared.deleteGroup(g) }
         })
+        return menu
+    }
+
+    func buildFolderMenu(_ p: String) -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(ClosureMenuItem(title: "打开") { NSWorkspace.shared.open(URL(fileURLWithPath: p, isDirectory: true)) })
+        menu.addItem(ClosureMenuItem(title: "在访达中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) })
+        menu.addItem(.separator())
+        menu.addItem(ClosureMenuItem(title: "从程序坞中移除") { [weak self] in self?.model.unpinFolder(p) })
         return menu
     }
 
@@ -1222,6 +1249,7 @@ final class DockBarView: NSView {
             switch e {
             case .app(let p, true) where p != model.finderPath: toks.append("app:" + p)
             case .group(let id): toks.append("group:" + id.uuidString)
+            case .folder(let p): toks.append("folder:" + p)
             default: break
             }
         }
@@ -1241,6 +1269,15 @@ final class DockBarView: NSView {
         let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
         return urls.filter { $0.pathExtension == "app" }.map { CustomDockModel.norm($0.path) }
     }
+    // 拖进来的全是文件夹（不含 .app 这类包）时才算"固定文件夹"；混着普通文件就按普通文件处理
+    private func draggedFolders(_ info: NSDraggingInfo) -> [String] {
+        let urls = draggedFiles(info)
+        let dirs = urls.filter { u in
+            let v = try? u.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+            return v?.isDirectory == true && v?.isPackage != true
+        }
+        return dirs.count == urls.count ? dirs.map { CustomDockModel.norm($0.path) } : []
+    }
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { draggingUpdated(sender) }
     private func draggedFiles(_ info: NSDraggingInfo) -> [URL] {
         info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
@@ -1257,10 +1294,24 @@ final class DockBarView: NSView {
             startLink()
             return .link
         }
-        // 普通文件：拖到应用图标上 = 用这个应用打开；拖到废纸篓上 = 扔进废纸篓
+        // 文件夹：压在应用/文件夹图标中心 = 用它打开 / 移进去；压在废纸篓上 = 扔掉；其他位置 = 固定到程序坞
+        if !draggedFolders(sender).isEmpty {
+            dropInsert = nil
+            if let t = centerHit(p.x, { if case .app = $0 { return true }; if case .folder = $0 { return true }; return false }) {
+                dropTarget = t; startLink(); return t.hasPrefix("app:") ? .generic : .move
+            }
+            if let i = index(at: p), case .trash = model.entries[i] { dropTarget = "trash"; startLink(); return .delete }
+            dropTarget = nil
+            dropInsert = insertIndex(for: p.x, excluding: "", list: model.entries)
+            reordering = true
+            startLink()
+            return .link
+        }
+        // 普通文件：拖到应用图标上 = 用这个应用打开；拖到文件夹上 = 移进去；拖到废纸篓上 = 扔进废纸篓
         if !draggedFiles(sender).isEmpty, let i = index(at: p) {
             switch model.entries[i] {
             case .app: dropTarget = model.entries[i].id; startLink(); return .generic
+            case .folder: dropTarget = model.entries[i].id; startLink(); return .move
             case .trash: dropTarget = "trash"; startLink(); return .delete
             default: break
             }
@@ -1288,10 +1339,17 @@ final class DockBarView: NSView {
             NSWorkspace.shared.open(draggedFiles(sender), withApplicationAt: URL(fileURLWithPath: String(t.dropFirst(4))), configuration: NSWorkspace.OpenConfiguration())
             startLink(); return true
         }
-        guard !apps.isEmpty else { return false }
+        if let t = target, t.hasPrefix("folder:") {
+            // 交给访达移动：同一个盘是移动、跨盘是拷贝，重名会照常弹访达自己的确认
+            let list = draggedFiles(sender).map { "POSIX file " + CustomDockModel.asQuote($0.path) }.joined(separator: ", ")
+            CustomDockModel.finder("move {\(list)} to (POSIX file \(CustomDockModel.asQuote(String(t.dropFirst(7)))) as alias)")
+            startLink(); return true
+        }
+        let folders = draggedFolders(sender)
+        guard !apps.isEmpty || !folders.isEmpty else { dropInsert = nil; return false }
         let ins = dropInsert ?? model.entries.count
         dropInsert = nil
-        pin(apps, atEntryIndex: ins)
+        if apps.isEmpty { pinFolders(folders, atEntryIndex: ins) } else { pin(apps, atEntryIndex: ins) }
         startLink()
         return true
     }
@@ -1303,6 +1361,15 @@ final class DockBarView: NSView {
         let anchor = before.last.flatMap { list.firstIndex(of: $0) }.map { $0 + 1 } ?? 0
         list.insert(contentsOf: apps, at: min(anchor, list.count))
         model.pinned = list
+    }
+
+    // 把文件夹固定到第 ins 个条目位置：条目 id 和顺序里的记号是同一套写法，直接在顺序里找它前面最近的那个
+    func pinFolders(_ paths: [String], atEntryIndex ins: Int) {
+        let toks = paths.map { "folder:" + $0 }
+        var ord = model.order.filter { !toks.contains($0) }
+        let anchor = model.entries.prefix(ins).reversed().lazy.compactMap { e in ord.firstIndex(of: e.id) }.first.map { $0 + 1 } ?? 0
+        ord.insert(contentsOf: toks, at: anchor)
+        model.order = ord
     }
 
     // 启动弹跳
