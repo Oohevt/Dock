@@ -65,6 +65,54 @@ final class CustomDockModel: ObservableObject {
         watchRunningApps()
     }
 
+    // 访达里开着的文件夹：固定的文件夹在这里面就亮指示点。
+    // 用辅助功能监听访达的窗口事件（开/关窗口；切换目录时访达会改窗口标题），收到事件再问访达各窗口在看哪个文件夹。
+    // 路径只能问访达（AppleScript，和废纸篓共用"自动化"授权）：macOS 27 的访达窗口 AXDocument 是空的。
+    // 不轮询，只在访达窗口变化时问一次；只认每个窗口当前那个标签页
+    @Published var openFolders: Set<String> = []
+    private var finderObs: AXObserver?
+    private var finderPid: pid_t = 0
+    private let axQueue = DispatchQueue(label: "dg.finder.ax")
+    private var finderScanPending = false
+    func watchFinder() {
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first,
+              app.processIdentifier != finderPid else { return }
+        if let old = finderObs { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(old), .defaultMode); finderObs = nil }
+        finderPid = app.processIdentifier
+        var obs: AXObserver?
+        guard AXObserverCreate(finderPid, { _, _, _, ctx in
+            guard let ctx = ctx else { return }
+            Unmanaged<CustomDockModel>.fromOpaque(ctx).takeUnretainedValue().scanFinder()
+        }, &obs) == .success, let obs = obs else { dgLog("finder watch: observer failed"); return }
+        let el = AXUIElementCreateApplication(finderPid)
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        for n in [kAXWindowCreatedNotification, kAXUIElementDestroyedNotification, kAXTitleChangedNotification] { AXObserverAddNotification(obs, el, n as CFString, me) }
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .defaultMode)
+        finderObs = obs
+        scanFinder()
+    }
+    // 一次切目录会连着来好几个事件，合并成 0.15 秒后问一次；放后台线程，访达卡住也不拖住程序坞
+    func scanFinder() {
+        if finderScanPending { return }
+        finderScanPending = true
+        axQueue.asyncAfter(deadline: .now() + 0.15) {
+            // 先在访达里整体转成 alias list 再取路径；在访达里逐个窗口取 POSIX path 实测拿不到
+            let out = LoginItems.run("""
+            tell application "Finder" to set ts to target of every Finder window as alias list
+            set out to ""
+            repeat with t in ts
+            set out to out & POSIX path of t & linefeed
+            end repeat
+            return out
+            """)
+            let found = Set(out.split(separator: "\n").map { Self.norm(String($0)) }.filter { !$0.isEmpty })
+            DispatchQueue.main.async {
+                self.finderScanPending = false
+                if found != self.openFolders { dgLog("finder open folders: \(found.count)"); self.openFolders = found; CustomDockController.shared.relayout() }
+            }
+        }
+    }
+
     // "启动/退出"通知不够：有些应用启动时不带程序坞图标，过一会儿才变成普通应用（或反过来）；
     // 纯后台应用启动时系统根本不发启动通知。所以还要盯着"运行中的应用列表"，并且每 2 秒核对一次（见 tick）。
     // 注意：不要对单个 NSRunningApplication 做 KVO —— 应用退出时系统回调会访问到已释放的对象，连续开关应用必崩（实测 50 次内崩）
@@ -125,6 +173,7 @@ final class CustomDockModel: ObservableObject {
     }
 
     func rebuild() {
+        watchFinder()   // 访达重启后 pid 变了，要重新挂监听（只比较 pid，平时几乎没开销）
         let grouped = groupedPaths
         let runApps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
         running = Set(runApps.compactMap { $0.bundleURL.map { Self.norm($0.path) } })
@@ -472,6 +521,7 @@ final class DockBarView: NSView {
         // 哪些条目要亮运行指示点：在这里算好。以前每帧都算，分组里每个应用都要规范化一次路径（一次磁盘查询），放大时占了三成多 CPU
         runningIDs = Set(model.entries.filter { e in
             if case .app(let p, _) = e { return model.running.contains(p) }
+            if case .folder(let p) = e { return model.openFolders.contains(p) }
             if case .group(let gid) = e, let g = GroupManager.shared.groups.first(where: { $0.id == gid }) {
                 return g.apps.contains { model.running.contains(CustomDockModel.norm($0.path)) }
             }
