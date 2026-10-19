@@ -521,7 +521,7 @@ final class DockBarView: NSView {
         // 哪些条目要亮运行指示点：在这里算好。以前每帧都算，分组里每个应用都要规范化一次路径（一次磁盘查询），放大时占了三成多 CPU
         runningIDs = Set(model.entries.filter { e in
             if case .app(let p, _) = e { return model.running.contains(p) }
-            if case .folder(let p) = e { return model.openFolders.contains(p) }
+            if case .folder(let p) = e { return model.openFolders.contains { $0 == p || $0.hasPrefix(p + "/") } }   // 在访达里点进子文件夹也算开着
             if case .group(let gid) = e, let g = GroupManager.shared.groups.first(where: { $0.id == gid }) {
                 return g.apps.contains { model.running.contains(CustomDockModel.norm($0.path)) }
             }
@@ -1684,6 +1684,7 @@ final class CustomDockController {
         if Date().timeIntervalSince(lastSysDockCheck) > 5 { lastSysDockCheck = Date(); healSystemDock() }
         let dock = dockInfo
         let atEdge = edgeDisplay(m) == dock.id
+        if atEdge { checkNativeDockLeak(m, screen: dock.frame) } else { nativeLeakLogged = false }
         // 兜底：程序坞已经收起（或正在收起）时，名称提示绝不该还在。出现过一次"程序坞没了、提示还留在屏幕底边"，原因没查明，
         // 所以这里强制收掉并记一笔，下次能从日志里看到当时的状态
         if !shown && v.tipVisible {
@@ -1751,6 +1752,33 @@ final class CustomDockController {
         if !shown && atEdge && Date().timeIntervalSince(edgeSince ?? Date()) >= revealDelay { dgLog("autohide: show"); show() }
         else if shown && !overBar && !atEdge && Date().timeIntervalSince(lastInside) > Self.hideGrace && !popupOpen() && !v.menuOpen && v.dragState == nil { dgLog("autohide: hide m=\(m) local=\(local) glass=\(g) topY=\(topY) panel=\(p.frame) parked=\(parked) visible=\(p.isVisible) slide=\(v.slide)"); hide() }
     }
+    // 系统程序坞有时会在我们之外冒出来（出现过：它的名称提示和角标出现在屏幕底边，压在我们的玻璃下面被折射成倒影），原因没查明。
+    // 鼠标在底边时 0.3 秒问一次它的图标列表在哪（辅助功能，一次不到 1 毫秒）：顶边高过屏幕底边就记下当时的场景，每次冒出只记一笔
+    private var nativeLeakLogged = false, lastLeakCheck = Date.distantPast
+    private var dockAX: (pid: pid_t, list: AXUIElement)?
+    private func checkNativeDockLeak(_ m: NSPoint, screen: NSRect) {
+        guard !nativeLeakLogged, Date().timeIntervalSince(lastLeakCheck) > 0.3,
+              let dockApp = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return }
+        lastLeakCheck = Date()
+        if dockAX?.pid != dockApp.processIdentifier {
+            let el = AXUIElementCreateApplication(dockApp.processIdentifier)
+            AXUIElementSetMessagingTimeout(el, 0.1)
+            var c: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &c) == .success,
+                  let list = (c as? [AXUIElement])?.first else { return }
+            dockAX = (dockApp.processIdentifier, list)
+        }
+        var pv: CFTypeRef?
+        var pos = CGPoint.zero
+        guard let list = dockAX?.list, AXUIElementCopyAttributeValue(list, kAXPositionAttribute as CFString, &pv) == .success,
+              let v = pv, AXValueGetValue(v as! AXValue, .cgPoint, &pos) else { dockAX = nil; return }
+        let bottom = (NSScreen.screens.first?.frame.maxY ?? screen.maxY) - screen.minY   // 屏幕底边，换成辅助功能用的坐标（原点在左上）
+        guard pos.y < bottom - 1 else { return }
+        nativeLeakLogged = true
+        let front = NSWorkspace.shared.frontmostApplication
+        dgLog("native dock leaking: top=\(pos.y) bottom=\(bottom) mouse=\(m) front=\(front?.bundleIdentifier ?? "-") shown=\(shown) buttons=\(NSEvent.pressedMouseButtons) delay=\(UserDefaults(suiteName: "com.apple.dock")?.double(forKey: "autohide-delay") ?? -1) autohide=\(String(describing: SystemDockAPI.autoHideEnabled()))")
+    }
+
     private func popupOpen() -> Bool { NSApp.windows.contains { $0 is GroupPopupWindow && $0.isVisible } }
 
     // 从分组面板里往外拖应用。拖动中：光标在程序坞条上就让其他图标让出空位（at 为 nil 表示拖动结束/回到面板内）
