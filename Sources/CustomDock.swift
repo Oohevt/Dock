@@ -261,6 +261,7 @@ final class CustomDockModel: ObservableObject {
     }
 
     func openOrSwitch(_ path: String) {
+        let path = Self.hostApp(for: path) ?? path
         dgLog("openOrSwitch \(path)")
         // 用 LaunchServices 打开/激活：已运行则切换，未运行则启动（系统负责激活，避免 macOS 14+ 协作激活限制）
         let cfg = NSWorkspace.OpenConfiguration()
@@ -268,6 +269,19 @@ final class CustomDockModel: ObservableObject {
         NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path), configuration: cfg) { app, err in
             dgLog("openApplication result app=\(app?.bundleIdentifier ?? "nil") err=\(err?.localizedDescription ?? "nil")")
         }
+    }
+    // 套在别的应用包里的辅助应用，自己一个窗口都不显示、窗口由外层应用代为显示时，点它要激活外层应用。
+    // 实测微信：公众号/收藏文章由 WeChatAppEx.app（在 WeChat.app 里面）渲染，屏幕上的窗口却属于微信主程序；激活 WeChatAppEx 什么都不会出现。
+    // 只在辅助应用没有任何在屏窗口、外层应用又在运行时才转过去：Xcode 里的 Simulator 这类自己有窗口的不受影响
+    static func hostApp(for path: String) -> String? {
+        guard let r = path.range(of: ".app/Contents/") else { return nil }
+        let host = String(path[..<r.lowerBound]) + ".app"
+        let running = NSWorkspace.shared.runningApplications
+        guard let helper = running.first(where: { $0.bundleURL.map { norm($0.path) } == path }),
+              running.contains(where: { $0.bundleURL.map { norm($0.path) } == host }) else { return nil }
+        let wins = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        if wins.contains(where: { ($0[kCGWindowOwnerPID as String] as? pid_t) == helper.processIdentifier && ($0[kCGWindowLayer as String] as? Int) == 0 }) { return nil }
+        return host
     }
     func pin(_ p: String) { var l = pinned; if !l.contains(p) { l.append(p) }; pinned = l }
     func unpin(_ p: String) { pinned = pinned.filter { $0 != p } }
