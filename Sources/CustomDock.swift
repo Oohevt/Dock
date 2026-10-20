@@ -314,6 +314,16 @@ final class CustomDockModel: ObservableObject {
                   AXValueGetValue(pv as! AXValue, .cgPoint, &pt), AXValueGetValue(sv as! AXValue, .cgSize, &sz) else { continue }
             // 位置允许差一个标题栏的高度：两边对"窗口从哪算起"不完全一致
             if frames.contains(where: { abs($0.minX - pt.x) < 2 && abs($0.minY - pt.y) < 40 && abs($0.width - sz.width) < 3 }) {
+                // "一次全部"时激活外层应用会把它的所有窗口一起摆出来（微信的聊天窗口会盖在文章旁边），所以把别的普通窗口收到程序坞。
+                // 点外层应用的图标时系统会把它们还原
+                for o in (v as? [AXUIElement]) ?? [] where !CFEqual(o, w) {
+                    var sub: CFTypeRef?, mini: CFTypeRef?
+                    AXUIElementCopyAttributeValue(o, kAXSubroleAttribute as CFString, &sub)
+                    AXUIElementCopyAttributeValue(o, kAXMinimizedAttribute as CFString, &mini)
+                    if (sub as? String) == kAXStandardWindowSubrole as String, (mini as? Bool) != true {
+                        AXUIElementSetAttributeValue(o, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+                    }
+                }
                 AXUIElementPerformAction(w, kAXRaiseAction as CFString)
                 return AXUIElementSetAttributeValue(el, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
             }
